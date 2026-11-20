@@ -21,6 +21,8 @@ export type CurrencyRow = {
   active: boolean;
 };
 export type CurrencyRateSnapshot = { usdToInr: number; updatedAt: string };
+// `increaseInr` keeps the existing storage shape; it now stores the complete
+// company selling price (including the INR buy value), not an amount added on top.
 export type ProductIncrease = { sourceId: string; increaseInr: number; locked: boolean; updatedAt: string };
 export type SellingEntry = { sourceId: string; soldCount: number; updatedAt: string };
 

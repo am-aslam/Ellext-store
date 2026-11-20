@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from 'react';
 import { ArrowLeftRight, Archive, ChartNoAxesColumnIncreasing, Check, LayoutDashboard, LogOut, Pencil, Percent, Plus, Trash2, Upload, X } from 'lucide-react';
 import { isStoredCurrencyRate, isStoredCurrencyRows, readVersioned, storageKeys, writeVersioned, type CurrencyRateSnapshot, type CurrencyRow } from '../../lib/storage';
+import { MobileFinanceNav } from '../../components/mobile-finance-nav';
 
 type ExchangeApiResponse = { result?: string; base_code?: string; rates?: { INR?: number }; time_last_update_utc?: string };
 
@@ -147,7 +148,7 @@ export default function CurrencyExchangePage() {
         <button className="logout currency-logout" onClick={signOut}><LogOut size={17} /> Sign out</button>
       </aside>
       <section className="main-panel currency-main">
-        <header className="currency-header"><div><Link href="/" className="currency-mobile-home">Ellext<span>Store</span></Link><span className="currency-kicker">ELLEXTSTORE · FINANCE</span><h1>Currency Exchange</h1><p>Track product purchases in USD and their INR value.</p></div><button className="currency-add" onClick={openAdd}><Plus size={18} /> Add row</button></header>
+        <header className="currency-header"><div><div className="finance-mobile-topline"><MobileFinanceNav active="/currency-exchange" /><Link href="/" className="currency-mobile-home">Ellext<span>Store</span></Link></div><span className="currency-kicker">ELLEXTSTORE · FINANCE</span><h1>Currency Exchange</h1><p>Track product purchases in USD and their INR value.</p></div><button className="currency-add" onClick={openAdd}><Plus size={18} /> Add row</button></header>
         <div className="currency-summary">
           <article><span>USD BUY VALUE</span><strong>{formatMoney(totals.usd, 'USD')}</strong><small>{totals.count.toLocaleString('en-IN')} products across active rows</small></article>
           <article><span>INR EXCHANGE VALUE</span><strong>{inrTotal === null ? '—' : formatMoney(inrTotal, 'INR')}</strong><small>Converted using the current USD to INR rate</small></article>

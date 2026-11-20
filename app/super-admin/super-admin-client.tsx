@@ -14,7 +14,7 @@ type BackupRow = {
   status: 'Active' | 'Archived';
   usdBuy: number;
   inrBuy: number | null;
-  increase: number;
+  increase: number | null;
   sellingPrice: number | null;
   productCount: number;
   soldCount: number;
@@ -37,8 +37,9 @@ function readSalesBackup(): SalesBackup {
     const product = productsById.get(sale.sourceId);
     if (!product) return [];
     const inrBuy = rate ? product.usd * rate.usdToInr : null;
-    const increase = increasesById.get(product.id) ?? 0;
-    const sellingPrice = inrBuy === null ? null : inrBuy + increase;
+    const companyAmount = increasesById.get(product.id);
+    const increase = inrBuy === null || companyAmount === undefined ? null : companyAmount - inrBuy;
+    const sellingPrice = companyAmount ?? null;
     return [{
       date: product.date,
       description: product.description,
@@ -57,7 +58,7 @@ function readSalesBackup(): SalesBackup {
     rows,
     rate,
     totalSold: rows.reduce((sum, row) => sum + row.soldCount, 0),
-    totalCollected: rate ? rows.reduce((sum, row) => sum + (row.collected ?? 0), 0) : null,
+    totalCollected: rows.some(row => row.collected !== null) ? rows.reduce((sum, row) => sum + (row.collected ?? 0), 0) : null,
     generatedAt: new Date().toISOString(),
   };
 }
@@ -174,7 +175,7 @@ export default function SuperAdminClient({ userName }: { userName: string }) {
         head: [['Date', 'Product', 'Status', 'USD buy / unit', 'INR buy / unit', 'Increase / unit', 'Product count', 'Sold items', 'Collected (INR)']],
         body: backup.rows.map((row) => [
           new Date(row.date).toLocaleDateString('en-IN'), row.description, row.status,
-          `$${row.usdBuy.toFixed(2)}`, row.inrBuy === null ? '—' : row.inrBuy.toFixed(2), row.increase.toFixed(2),
+          `$${row.usdBuy.toFixed(2)}`, row.inrBuy === null ? '—' : row.inrBuy.toFixed(2), row.increase === null ? '—' : row.increase.toFixed(2),
           String(row.productCount), String(row.soldCount), row.collected === null ? '—' : row.collected.toFixed(2),
         ]),
         margin: { left: 38, right: 38 },
