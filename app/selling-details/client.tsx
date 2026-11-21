@@ -3,7 +3,7 @@
 import Image from 'next/image';
 import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
-import { ArrowLeftRight, Check, ChartNoAxesColumnIncreasing, LayoutDashboard, LockKeyhole, LogOut, Percent, UnlockKeyhole, X } from 'lucide-react';
+import { ArrowLeftRight, Check, ChartNoAxesColumnIncreasing, LayoutDashboard, LockKeyhole, LogOut, Percent, Plus, ReceiptText, UnlockKeyhole, X } from 'lucide-react';
 import { isStoredCurrencyRows, isStoredProductIncreases, isStoredSellingEntries, readVersioned, storageKeys, writeVersioned, type CurrencyRow, type ProductIncrease, type SellingEntry } from '../../lib/storage';
 import { MobileFinanceNav } from '../../components/mobile-finance-nav';
 
@@ -85,16 +85,18 @@ export default function SellingDetailsPage() {
           <Link className="nav-link" href="/currency-exchange"><ArrowLeftRight size={19} strokeWidth={1.8} /><span>Currency Exchange</span></Link>
           <Link className="nav-link" href="/product-percentage"><Percent size={19} strokeWidth={1.8} /><span>Product Percentage</span></Link>
           <Link className="nav-link selected" href="/selling-details"><ChartNoAxesColumnIncreasing size={19} strokeWidth={1.8} /><span>Selling Details</span></Link>
+          <Link className="nav-link" href="/expense-ledger"><ReceiptText size={19} strokeWidth={1.8} /><span>Expense Ledger</span></Link>
         </nav>
         <div className="currency-sidebar-note"><span className="currency-rate-icon"><ChartNoAxesColumnIncreasing size={18} /></span><span>Units sold<br /><b>{totals.sold.toLocaleString('en-IN')}</b></span></div>
         <button className="logout currency-logout" onClick={signOut}><LogOut size={17} /> Sign out</button>
       </aside>
 
       <section className="main-panel currency-main selling-main">
-        <header className="currency-header"><div><div className="finance-mobile-topline"><MobileFinanceNav active="/selling-details" /><Link href="/" className="currency-mobile-home">Ellext<span>Store</span></Link></div><span className="currency-kicker">ELLEXTSTORE · SALES</span><h1>Selling Details</h1><p>Record sold items and track collected amounts for each product.</p></div></header>
+        <header className="currency-header"><div><div className="finance-mobile-topline"><MobileFinanceNav active="/selling-details" /><Link href="/" className="currency-mobile-home">Ellext<span>Store</span></Link></div><span className="currency-kicker">ELLEXTSTORE · SALES</span><h1>Selling Details</h1><p>Record sold items and collected amounts.</p></div><Link href="/expense-ledger" className="currency-add"><Plus size={17}/> Expense ledger</Link></header>
         <div className="selling-summary">
           <article><span>SOLD ITEMS</span><strong>{totals.sold.toLocaleString('en-IN')}</strong><small>of {rows.reduce((sum, row) => sum + row.productCount, 0).toLocaleString('en-IN')} active products</small></article>
           <article><span>COLLECTED AMOUNT</span><strong>{totals.hasPrice ? formatMoney(totals.collected) : '—'}</strong><small>Sold count × company selling amount</small></article>
+          <Link href="/expense-ledger" className="selling-summary-link"><Plus size={17} /><span>Operating expenses<br /><b>Open expense ledger</b></span></Link>
           <Link href="/product-percentage" className="selling-summary-link"><Percent size={17} /><span>Company selling amounts<br /><b>Manage product pricing</b></span></Link>
         </div>
         <div className="currency-table-heading"><div><h2>Product sales rows</h2><p>{rows.length} active product {rows.length === 1 ? 'row' : 'rows'} from Currency Exchange</p></div></div>
@@ -125,7 +127,7 @@ export default function SellingDetailsPage() {
             <div className="selling-mobile-values"><div><span>Company amount</span><b>{companyAmount === undefined ? '—' : formatMoney(companyAmount)}</b></div><div><span>Products available</span><b>{row.productCount.toLocaleString('en-IN')}</b></div><div><span>Collected</span><b>{collected === null ? '—' : formatMoney(collected)}</b></div><div><span>Sold items</span><div className={`selling-count-editor ${editingIds.includes(row.id) ? 'count-editing' : 'count-locked'}`}><label className="visually-hidden" htmlFor={`mobile-sold-${row.id}`}>Sold item count for {row.description}</label><input id={`mobile-sold-${row.id}`} type="number" min="0" max={row.productCount} step="1" value={drafts[row.id] ?? '0'} disabled={!editingIds.includes(row.id)} onChange={event => changeSoldDraft(row, event.target.value)} />{editingIds.includes(row.id) ? <><button onClick={() => saveSoldCount(row)} aria-label={`Save and lock sold count for ${row.description}`} title="Save and lock"><Check size={15} /></button><button className="count-lock-button" onClick={() => lockSoldCount(row)} aria-label={`Cancel and lock sold count for ${row.description}`} title="Cancel and lock"><LockKeyhole size={14} /></button></> : <button className="count-unlock-button" onClick={() => unlockSoldCount(row)} aria-label={`Unlock sold count for ${row.description}`} title="Unlock to edit"><UnlockKeyhole size={15} /></button>}{errors[row.id] && <small className="increase-error" role="alert">{errors[row.id]}</small>}</div></div></div>
           </article>;
         })}</div></> : <div className="currency-empty percentage-empty-state"><span className="currency-empty-icon"><ChartNoAxesColumnIncreasing size={20} /></span><strong>No products to record sales for</strong><p>Add active product rows in Currency Exchange. They will appear here with their company selling amount and available product count.</p><Link href="/currency-exchange" className="currency-empty-link"><ArrowLeftRight size={15} /> Go to Currency Exchange</Link></div>}
-        <footer className="currency-source"><span className="rate-dot" />Collected amount = sold item count × company amount. The company amount is the complete selling price and already includes the INR buy value.</footer>
+        <footer className="currency-source"><span className="rate-dot" />Collected amount = sold item count × company amount. Record operating expenses in the Expense Ledger to update Company Growth.</footer>
       </section>
     </div>
     {preview && <div className="modal-scrim image-preview-scrim" onMouseDown={event => { if (event.target === event.currentTarget) setPreview(null); }}><section className="image-preview-card" role="dialog" aria-modal="true" aria-label={`${preview.description} image preview`}><button className="modal-close image-preview-close" onClick={() => setPreview(null)} aria-label="Close image preview"><X size={18} /></button><Image src={preview.image} alt={preview.description} fill sizes="(max-width: 700px) 90vw, 640px" unoptimized /><p>{preview.description}</p></section></div>}

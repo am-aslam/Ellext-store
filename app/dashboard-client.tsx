@@ -3,7 +3,7 @@
 import Image from 'next/image';
 import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { ArrowLeftRight, ChartNoAxesColumnIncreasing, LayoutDashboard, LogOut, Menu, Percent, ShieldCheck, ShoppingBag, X } from 'lucide-react';
+import { ArrowLeftRight, ChartNoAxesColumnIncreasing, LayoutDashboard, LogOut, Menu, Percent, ReceiptText, ShieldCheck, ShoppingBag, TrendingUp, X } from 'lucide-react';
 import { isStoredCurrencyRows, isStoredProductIncreases, isStoredSellingEntries, readVersioned, storageKeys, writeVersioned, type CurrencyRow } from '../lib/storage';
 
 type DashboardSale = {
@@ -52,7 +52,9 @@ function DashboardSidebar({ open, onClose, data, isSuperAdmin }: { open: boolean
         <Link className="nav-link" href="/currency-exchange" onClick={onClose}><ArrowLeftRight size={19} /><span>Currency Exchange</span></Link>
         <Link className="nav-link" href="/product-percentage" onClick={onClose}><Percent size={19} /><span>Product Percentage</span></Link>
         <Link className="nav-link" href="/selling-details" onClick={onClose}><ChartNoAxesColumnIncreasing size={19} /><span>Selling Details</span></Link>
+        <Link className="nav-link" href="/expense-ledger" onClick={onClose}><ReceiptText size={19} /><span>Expense Ledger</span></Link>
         {isSuperAdmin && <Link className="nav-link" href="/super-admin" onClick={onClose}><ShieldCheck size={19} /><span>Super Admin</span></Link>}
+        {isSuperAdmin && <Link className="nav-link" href="/company-growth" onClick={onClose}><TrendingUp size={19} /><span>Company Growth</span></Link>}
       </nav>
       <section className="dashboard-side-summary"><span className="dashboard-side-icon"><ShoppingBag size={17} /></span><div><small>SALES SNAPSHOT</small><b>{data.sold.toLocaleString('en-IN')} items sold</b><span>{data.collected === null ? 'Set company selling amounts' : formatInr(data.collected)} collected</span></div></section>
       <Link href="/selling-details" className="dashboard-side-link" onClick={onClose}>Open selling details <span aria-hidden>↗</span></Link>

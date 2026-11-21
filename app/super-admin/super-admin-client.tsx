@@ -2,7 +2,7 @@
 
 import { useEffect, useState, type FormEvent } from 'react';
 import Link from 'next/link';
-import { ArrowLeft, Check, Copy, Database, FileSpreadsheet, FileText, LogOut, Plus, ShieldCheck, X } from 'lucide-react';
+import { ArrowLeft, Check, Copy, Database, FileSpreadsheet, FileText, LogOut, Plus, ReceiptText, ShieldCheck, X } from 'lucide-react';
 import { isStoredCurrencyRate, isStoredCurrencyRows, isStoredProductIncreases, isStoredSellingEntries, readVersioned, storageKeys, type CurrencyRateSnapshot, type CurrencyRow, type ProductIncrease, type SellingEntry } from '@/lib/storage';
 
 type AdminAccount = { id: string; name: string; email: string; role: 'admin' };
@@ -192,7 +192,7 @@ export default function SuperAdminClient({ userName }: { userName: string }) {
   }
   const usingLocal = status?.mode === 'sqlite';
 
-  return <main className="admin-page"><header className="admin-topbar"><Link href="/" className="auth-brand">Ellext<span>Store</span><i /></Link><div><span className="admin-user"><ShieldCheck size={16} /> {userName} · Super Admin</span><button className="admin-signout" onClick={signOut}><LogOut size={15} /> Sign out</button></div></header>
+  return <main className="admin-page"><header className="admin-topbar"><Link href="/" className="auth-brand">Ellext<span>Store</span><i /></Link><div><span className="admin-user"><ShieldCheck size={16} /> {userName} · Super Admin</span><Link href="/expense-ledger" className="admin-signout"><ReceiptText size={15} /> Expense Ledger</Link><button className="admin-signout" onClick={signOut}><LogOut size={15} /> Sign out</button></div></header>
     <div className="admin-content"><Link href="/" className="admin-back"><ArrowLeft size={15} /> Dashboard</Link>
       <span className="auth-kicker">ELLEXTSTORE · ACCESS CONTROL</span><h1>Super Admin</h1><p className="admin-subtitle">Manage dashboard access and check the active data store.</p>
       <section className={`store-status ${usingLocal ? 'store-status-local' : 'store-status-online'}`} role="status"><span className="store-status-icon"><Database size={19} /></span><div><strong>{usingLocal ? (status?.supabaseConfigured ? 'Supabase is unavailable' : 'Supabase is not configured') : 'Supabase is connected'}</strong><p>{usingLocal ? 'The app is using the local SQLite database. Local account changes are saved on this device.' : 'Supabase is active. A local SQLite copy is maintained for sign-in fallback.'}</p></div><span className="store-status-pill">{usingLocal ? 'LOCAL DATABASE' : 'SUPABASE'}</span></section>

@@ -3,6 +3,7 @@ import 'server-only';
 import bcrypt from 'bcryptjs';
 import Database from 'better-sqlite3';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+import { Pool } from 'pg';
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -18,7 +19,7 @@ const SESSION_MAX_AGE = 60 * 60 * 24 * 7;
 type UserRow = AppUser & { password_hash: string; supabase_user_id: string | null; created_at: string };
 type SessionRow = { id: string; email: string; name: string; role: UserRole; expires_at: number };
 
-const globalForDb = globalThis as typeof globalThis & { ellextDb?: Database.Database };
+const globalForDb = globalThis as typeof globalThis & { ellextDb?: Database.Database; ellextExpensePool?: Pool; ellextExpenseSchema?: Promise<boolean> };
 function db(): Database.Database {
   if (globalForDb.ellextDb) return globalForDb.ellextDb;
   // Vercel's deployed function bundle is read-only. Keep the SQLite fallback
@@ -40,13 +41,26 @@ function db(): Database.Database {
       expires_at INTEGER NOT NULL, created_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS sessions_expiry_idx ON sessions(expires_at);
-    CREATE TABLE IF NOT EXISTS currency_rows (id TEXT PRIMARY KEY, row_date TEXT NOT NULL, image TEXT NOT NULL DEFAULT '', description TEXT NOT NULL, usd REAL NOT NULL CHECK(usd >= 0), product_count INTEGER NOT NULL CHECK(product_count >= 0), active INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+    CREATE TABLE IF NOT EXISTS currency_rows (id TEXT PRIMARY KEY, row_date TEXT NOT NULL, image TEXT NOT NULL DEFAULT '', description TEXT NOT NULL, category TEXT NOT NULL DEFAULT 'Ring', usd REAL NOT NULL CHECK(usd >= 0), product_count INTEGER NOT NULL CHECK(product_count >= 0), active INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
     CREATE TABLE IF NOT EXISTS product_increases (source_id TEXT PRIMARY KEY REFERENCES currency_rows(id) ON DELETE CASCADE, selling_price_inr REAL NOT NULL CHECK(selling_price_inr >= 0), locked INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
-    CREATE TABLE IF NOT EXISTS selling_entries (source_id TEXT PRIMARY KEY REFERENCES currency_rows(id) ON DELETE CASCADE, sold_count INTEGER NOT NULL DEFAULT 0 CHECK(sold_count >= 0), updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+    CREATE TABLE IF NOT EXISTS selling_entries (source_id TEXT PRIMARY KEY REFERENCES currency_rows(id) ON DELETE CASCADE, sold_count INTEGER NOT NULL DEFAULT 0 CHECK(sold_count >= 0), unit_expense REAL NOT NULL DEFAULT 0 CHECK(unit_expense >= 0), updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+    CREATE TABLE IF NOT EXISTS company_expenses (id TEXT PRIMARY KEY, amount_inr REAL NOT NULL CHECK(amount_inr > 0), category TEXT NOT NULL DEFAULT 'Other', note TEXT NOT NULL, expense_date TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
     CREATE TABLE IF NOT EXISTS product_requests (id TEXT PRIMARY KEY, name TEXT NOT NULL, category TEXT NOT NULL, notes TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'Submitted' CHECK(status IN ('Submitted','Under review','Fulfilled')), created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
     CREATE TABLE IF NOT EXISTS member_invitations (email TEXT PRIMARY KEY COLLATE NOCASE, name TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'Pending' CHECK(status IN ('Pending','Accepted','Expired')), created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+    CREATE TABLE IF NOT EXISTS product_categories (name TEXT PRIMARY KEY, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+    CREATE TABLE IF NOT EXISTS company_expenses (id TEXT PRIMARY KEY, amount_inr REAL NOT NULL CHECK(amount_inr > 0), note TEXT NOT NULL, expense_date TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+    CREATE TABLE IF NOT EXISTS expense_ledger (id TEXT PRIMARY KEY, amount_inr REAL NOT NULL CHECK(amount_inr > 0), category TEXT NOT NULL DEFAULT 'Other', note TEXT NOT NULL, expense_date TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, created_by TEXT NOT NULL DEFAULT '');
     CREATE TABLE IF NOT EXISTS dashboard_snapshots (user_id TEXT NOT NULL, storage_key TEXT NOT NULL, payload TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(user_id,storage_key));
   `);
+  if (!database.prepare('PRAGMA table_info(currency_rows)').all().some(column => (column as { name?: string }).name === 'category')) {
+    database.exec("ALTER TABLE currency_rows ADD COLUMN category TEXT NOT NULL DEFAULT 'Ring'");
+  }
+  if (!database.prepare('PRAGMA table_info(selling_entries)').all().some(column => (column as { name?: string }).name === 'unit_expense')) {
+    database.exec('ALTER TABLE selling_entries ADD COLUMN unit_expense REAL NOT NULL DEFAULT 0');
+  }
+  if (!database.prepare('PRAGMA table_info(expense_ledger)').all().some(column => (column as { name?: string }).name === 'created_by')) {
+    database.exec("ALTER TABLE expense_ledger ADD COLUMN created_by TEXT NOT NULL DEFAULT ''");
+  }
   globalForDb.ellextDb = database;
   return database;
 }
@@ -200,3 +214,87 @@ export function clearSession(token: string | undefined) {
   cookies().delete(SESSION_COOKIE);
 }
 export function getAuthDataStore() { return db(); }
+
+
+export type LedgerRecord = { id: string; amount: number; category: string; note: string; date: string; createdBy: string };
+function expensePool(): Pool | null {
+  const connectionString = process.env.SUPABASE_DB_URL?.trim();
+  if (!connectionString) return null;
+  if (!globalForDb.ellextExpensePool) {
+    globalForDb.ellextExpensePool = new Pool({ connectionString, ssl: { rejectUnauthorized: false }, max: 2, connectionTimeoutMillis: 2500, query_timeout: 4000 });
+  }
+  return globalForDb.ellextExpensePool;
+}
+async function ensureExpenseTable(pool: Pool): Promise<boolean> {
+  if (!globalForDb.ellextExpenseSchema) {
+    globalForDb.ellextExpenseSchema = (async () => {
+      await pool.query(`CREATE TABLE IF NOT EXISTS public.expense_ledger (
+        id text PRIMARY KEY,
+        amount_inr numeric(14,2) NOT NULL CHECK (amount_inr > 0),
+        category text NOT NULL DEFAULT 'Other',
+        note text NOT NULL,
+        expense_date timestamptz NOT NULL DEFAULT now(),
+        created_by text NOT NULL DEFAULT ''
+      )`);
+      await pool.query("ALTER TABLE public.expense_ledger ADD COLUMN IF NOT EXISTS created_by text NOT NULL DEFAULT ''");
+      await pool.query('ALTER TABLE public.expense_ledger ENABLE ROW LEVEL SECURITY');
+      await pool.query('REVOKE ALL ON public.expense_ledger FROM anon, authenticated');
+      await pool.query('GRANT ALL ON public.expense_ledger TO service_role');
+      return true;
+    })().catch(() => false);
+  }
+  const ready = await globalForDb.ellextExpenseSchema;
+  if (!ready) globalForDb.ellextExpenseSchema = undefined;
+  return ready;
+}
+export async function readExpenseLedger(): Promise<LedgerRecord[]> {
+  const pool = expensePool();
+  if (pool && await ensureExpenseTable(pool)) {
+    try {
+      const { rows } = await pool.query('SELECT id,amount_inr,category,note,expense_date,created_by FROM public.expense_ledger ORDER BY expense_date DESC');
+      return rows.map(row => ({ id: row.id, amount: Number(row.amount_inr), category: row.category, note: row.note, date: new Date(row.expense_date).toISOString(), createdBy: row.created_by ?? '' }));
+    } catch { /* Fall through to the Supabase REST and SQLite stores. */ }
+  }
+  if (await getStorageMode() === 'supabase') {
+    const client = getSupabaseAdmin();
+    if (client) {
+      const { data, error } = await client.from('expense_ledger').select('id,amount_inr,category,note,expense_date,created_by').order('expense_date', { ascending: false });
+      if (!error) return (data ?? []).map(row => ({ id: row.id, amount: Number(row.amount_inr), category: row.category, note: row.note, date: row.expense_date, createdBy: row.created_by ?? '' }));
+    }
+  }
+  return db().prepare('SELECT id,amount_inr as amount,category,note,expense_date as date,created_by as createdBy FROM expense_ledger ORDER BY expense_date DESC').all() as LedgerRecord[];
+}
+export async function addExpenseLedgerRecord(record: LedgerRecord) {
+  const pool = expensePool();
+  if (pool && await ensureExpenseTable(pool)) {
+    try {
+      await pool.query(`INSERT INTO public.expense_ledger(id,amount_inr,category,note,expense_date,created_by) VALUES($1,$2,$3,$4,$5,$6)
+        ON CONFLICT(id) DO UPDATE SET amount_inr=EXCLUDED.amount_inr,category=EXCLUDED.category,note=EXCLUDED.note,expense_date=EXCLUDED.expense_date,created_by=EXCLUDED.created_by`, [record.id, record.amount, record.category, record.note, record.date, record.createdBy]);
+      return;
+    } catch { /* Fall through to the Supabase REST and SQLite stores. */ }
+  }
+  if (await getStorageMode() === 'supabase') {
+    const client = getSupabaseAdmin();
+    if (client) {
+      const { error } = await client.from('expense_ledger').upsert({ id: record.id, amount_inr: record.amount, category: record.category, note: record.note, expense_date: record.date, created_by: record.createdBy }, { onConflict: 'id' });
+      if (!error) return;
+    }
+  }
+  db().prepare(`INSERT INTO expense_ledger(id,amount_inr,category,note,expense_date,created_by) VALUES(?,?,?,?,?,?)
+    ON CONFLICT(id) DO UPDATE SET amount_inr=excluded.amount_inr,category=excluded.category,note=excluded.note,expense_date=excluded.expense_date,created_by=excluded.created_by`).run(record.id, record.amount, record.category, record.note, record.date, record.createdBy);
+}
+export async function deleteExpenseLedgerRecord(id: string) {
+  const pool = expensePool();
+  if (pool && await ensureExpenseTable(pool)) {
+    try { await pool.query('DELETE FROM public.expense_ledger WHERE id=$1', [id]); return; }
+    catch { /* Fall through to the Supabase REST and SQLite stores. */ }
+  }
+  if (await getStorageMode() === 'supabase') {
+    const client = getSupabaseAdmin();
+    if (client) {
+      const { error } = await client.from('expense_ledger').delete().eq('id', id);
+      if (!error) return;
+    }
+  }
+  db().prepare('DELETE FROM expense_ledger WHERE id=?').run(id);
+}

@@ -5,11 +5,13 @@ CREATE TABLE IF NOT EXISTS public.currency_rows (
   row_date date NOT NULL,
   image text NOT NULL DEFAULT '',
   description text NOT NULL,
+  category text NOT NULL DEFAULT 'Ring',
   usd numeric(14,2) NOT NULL CHECK (usd >= 0),
   product_count integer NOT NULL CHECK (product_count >= 0),
   active boolean NOT NULL DEFAULT true,
   updated_at timestamptz NOT NULL DEFAULT now()
 );
+ALTER TABLE public.currency_rows ADD COLUMN IF NOT EXISTS category text NOT NULL DEFAULT 'Ring';
 
 CREATE TABLE IF NOT EXISTS public.product_increases (
   source_id text PRIMARY KEY REFERENCES public.currency_rows(id) ON DELETE CASCADE,
@@ -21,8 +23,10 @@ CREATE TABLE IF NOT EXISTS public.product_increases (
 CREATE TABLE IF NOT EXISTS public.selling_entries (
   source_id text PRIMARY KEY REFERENCES public.currency_rows(id) ON DELETE CASCADE,
   sold_count integer NOT NULL DEFAULT 0 CHECK (sold_count >= 0),
+  unit_expense_inr numeric(14,2) NOT NULL DEFAULT 0 CHECK (unit_expense_inr >= 0),
   updated_at timestamptz NOT NULL DEFAULT now()
 );
+ALTER TABLE public.selling_entries ADD COLUMN IF NOT EXISTS unit_expense_inr numeric(14,2) NOT NULL DEFAULT 0 CHECK (unit_expense_inr >= 0);
 
 CREATE TABLE IF NOT EXISTS public.product_requests (
   id text PRIMARY KEY,
@@ -39,6 +43,29 @@ CREATE TABLE IF NOT EXISTS public.member_invitations (
   status text NOT NULL DEFAULT 'Pending' CHECK (status IN ('Pending','Accepted','Expired')),
   created_at timestamptz NOT NULL DEFAULT now()
 );
+
+CREATE TABLE IF NOT EXISTS public.product_categories (
+  name text PRIMARY KEY,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS public.company_expenses (
+  id text PRIMARY KEY,
+  amount_inr numeric(14,2) NOT NULL CHECK (amount_inr > 0),
+  category text NOT NULL DEFAULT 'Other',
+  note text NOT NULL,
+  expense_date timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS public.expense_ledger (
+  id text PRIMARY KEY,
+  amount_inr numeric(14,2) NOT NULL CHECK (amount_inr > 0),
+  category text NOT NULL DEFAULT 'Other',
+  note text NOT NULL,
+  expense_date timestamptz NOT NULL DEFAULT now(),
+  created_by text NOT NULL DEFAULT ''
+);
+ALTER TABLE public.expense_ledger ADD COLUMN IF NOT EXISTS created_by text NOT NULL DEFAULT '';
 
 -- Local browser state can be migrated into this table without exposing it to
 -- unauthenticated Data API clients. Server-side code uses the DB connection.
@@ -60,10 +87,15 @@ ALTER TABLE public.product_increases ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.selling_entries ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.product_requests ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.member_invitations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.product_categories ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.company_expenses ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.expense_ledger ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.dashboard_snapshots ENABLE ROW LEVEL SECURITY;
 
 REVOKE ALL ON public.currency_rows, public.product_increases, public.selling_entries,
-  public.product_requests, public.member_invitations, public.dashboard_snapshots
+  public.product_requests, public.member_invitations, public.product_categories,
+  public.company_expenses, public.expense_ledger, public.dashboard_snapshots
   FROM anon, authenticated;
 GRANT ALL ON public.currency_rows, public.product_increases, public.selling_entries,
-  public.product_requests, public.member_invitations, public.dashboard_snapshots TO service_role;
+  public.product_requests, public.member_invitations, public.product_categories,
+  public.company_expenses, public.expense_ledger, public.dashboard_snapshots TO service_role;

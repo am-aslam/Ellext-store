@@ -20,7 +20,9 @@ export default function SignInPage() {
       const response = await fetch('/api/auth/sign-in', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email, password }) });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || 'Unable to sign in.');
-      window.location.assign('/');
+      const requestedPath = new URL(window.location.href).searchParams.get('next');
+      const safePath = requestedPath?.startsWith('/') && !requestedPath.startsWith('//') ? requestedPath : '/';
+      window.location.assign(safePath);
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'Unable to sign in.'); setBusy(false); }
   }
 

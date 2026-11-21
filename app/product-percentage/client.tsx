@@ -3,7 +3,7 @@
 import Image from 'next/image';
 import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
-import { ArrowLeftRight, ChartNoAxesColumnIncreasing, Check, LayoutDashboard, LockKeyhole, LogOut, Pencil, Percent, UnlockKeyhole } from 'lucide-react';
+import { ArrowLeftRight, ChartNoAxesColumnIncreasing, Check, LayoutDashboard, LockKeyhole, LogOut, Pencil, Percent, ReceiptText, UnlockKeyhole } from 'lucide-react';
 import { isStoredCurrencyRate, isStoredCurrencyRows, isStoredProductIncreases, readVersioned, storageKeys, writeVersioned, type CurrencyRateSnapshot, type CurrencyRow, type ProductIncrease } from '../../lib/storage';
 import { MobileFinanceNav } from '../../components/mobile-finance-nav';
 
@@ -77,6 +77,7 @@ export default function ProductPercentagePage() {
           <Link className="nav-link" href="/currency-exchange"><ArrowLeftRight size={19} strokeWidth={1.8} /><span>Currency Exchange</span></Link>
           <Link className="nav-link selected" href="/product-percentage"><Percent size={19} strokeWidth={1.8} /><span>Product Percentage</span></Link>
           <Link className="nav-link" href="/selling-details"><ChartNoAxesColumnIncreasing size={19} strokeWidth={1.8} /><span>Selling Details</span></Link>
+          <Link className="nav-link" href="/expense-ledger"><ReceiptText size={19} strokeWidth={1.8} /><span>Expense Ledger</span></Link>
         </nav>
         <div className="currency-sidebar-note"><span className="currency-rate-icon"><Percent size={18} /></span><span>Markup entries<br /><b>{increases.length} saved</b></span></div>
         <button className="logout currency-logout" onClick={signOut}><LogOut size={17} /> Sign out</button>

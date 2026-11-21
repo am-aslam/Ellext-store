@@ -9,7 +9,14 @@ export const storageKeys = {
   currencyRate: 'ellextstore:v1:currency-rate',
   productIncreases: 'ellextstore:v1:product-increases',
   sellingEntries: 'ellextstore:v1:selling-entries',
+  productCategories: 'ellextstore:v1:product-categories',
+  companyExpenses: 'ellextstore:v1:company-expenses',
+  expenseLedger: 'ellextstore:v1:expense-ledger',
 } as const;
+
+export const defaultProductCategories = ['Ring', 'Bangle', 'Chain', 'Ear ring'];
+export type CompanyExpense = { id: string; amount: number; note: string; date: string };
+export type ExpenseLedgerEntry = { id: string; amount: number; category: string; note: string; date: string; createdBy?: string; localOnly?: boolean };
 
 export type CurrencyRow = {
   id: string;
@@ -19,17 +26,29 @@ export type CurrencyRow = {
   usd: number;
   productCount: number;
   active: boolean;
+  category?: string;
 };
 export type CurrencyRateSnapshot = { usdToInr: number; updatedAt: string };
 // `increaseInr` keeps the existing storage shape; it now stores the complete
 // company selling price (including the INR buy value), not an amount added on top.
 export type ProductIncrease = { sourceId: string; increaseInr: number; locked: boolean; updatedAt: string };
-export type SellingEntry = { sourceId: string; soldCount: number; updatedAt: string };
+export type SellingEntry = { sourceId: string; soldCount: number; unitExpense?: number; unitExpenseNote?: string; updatedAt: string };
 
 export function isStoredSellingEntries(value: unknown): value is SellingEntry[] {
   return Array.isArray(value) && value.every(item => isRecord(item)
     && typeof item.sourceId === 'string' && Number.isInteger(item.soldCount) && Number(item.soldCount) >= 0
+    && (item.unitExpense === undefined || (Number.isFinite(item.unitExpense) && Number(item.unitExpense) >= 0))
+    && (item.unitExpenseNote === undefined || (typeof item.unitExpenseNote === 'string' && item.unitExpenseNote.length <= 500))
     && isTimestamp(item.updatedAt));
+}
+
+export function isStoredExpenseLedger(value: unknown): value is ExpenseLedgerEntry[] {
+  return Array.isArray(value) && value.every(item => isRecord(item)
+    && typeof item.id === 'string' && Number.isFinite(item.amount) && Number(item.amount) > 0
+    && typeof item.category === 'string' && item.category.trim().length > 0
+    && typeof item.note === 'string' && item.note.trim().length > 0 && isTimestamp(item.date)
+    && (item.createdBy === undefined || typeof item.createdBy === 'string')
+    && (item.localOnly === undefined || typeof item.localOnly === 'boolean'));
 }
 
 export function isStoredProductIncreases(value: unknown): value is ProductIncrease[] {
@@ -45,6 +64,7 @@ export function isStoredCurrencyRows(value: unknown): value is CurrencyRow[] {
     && typeof row.description === 'string' && row.description.trim().length >= 2
     && Number.isFinite(row.usd) && Number(row.usd) >= 0
     && Number.isInteger(row.productCount) && Number(row.productCount) >= 0
+    && (row.category === undefined || typeof row.category === 'string')
     && typeof row.active === 'boolean');
 }
 
