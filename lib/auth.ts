@@ -5,6 +5,7 @@ import Database from 'better-sqlite3';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { cookies } from 'next/headers';
 
@@ -20,7 +21,10 @@ type SessionRow = { id: string; email: string; name: string; role: UserRole; exp
 const globalForDb = globalThis as typeof globalThis & { ellextDb?: Database.Database };
 function db(): Database.Database {
   if (globalForDb.ellextDb) return globalForDb.ellextDb;
-  const directory = path.join(process.cwd(), 'data');
+  // Vercel's deployed function bundle is read-only. Keep the SQLite fallback
+  // in its writable temp area; local development continues to use ./data.
+  const directory = process.env.ELLEXTSTORE_DB_DIR?.trim()
+    || (process.env.VERCEL ? path.join(tmpdir(), 'ellextstore') : path.join(process.cwd(), 'data'));
   mkdirSync(directory, { recursive: true });
   const database = new Database(path.join(directory, 'ellextstore.sqlite'));
   database.pragma('journal_mode = WAL');
