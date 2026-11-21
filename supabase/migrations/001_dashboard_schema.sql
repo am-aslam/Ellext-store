@@ -1,0 +1,69 @@
+-- EllextStore application data schema.
+-- Run with the Supabase Postgres connection; this is safe to apply repeatedly.
+CREATE TABLE IF NOT EXISTS public.currency_rows (
+  id text PRIMARY KEY,
+  row_date date NOT NULL,
+  image text NOT NULL DEFAULT '',
+  description text NOT NULL,
+  usd numeric(14,2) NOT NULL CHECK (usd >= 0),
+  product_count integer NOT NULL CHECK (product_count >= 0),
+  active boolean NOT NULL DEFAULT true,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS public.product_increases (
+  source_id text PRIMARY KEY REFERENCES public.currency_rows(id) ON DELETE CASCADE,
+  selling_price_inr numeric(14,2) NOT NULL CHECK (selling_price_inr >= 0),
+  locked boolean NOT NULL DEFAULT true,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS public.selling_entries (
+  source_id text PRIMARY KEY REFERENCES public.currency_rows(id) ON DELETE CASCADE,
+  sold_count integer NOT NULL DEFAULT 0 CHECK (sold_count >= 0),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS public.product_requests (
+  id text PRIMARY KEY,
+  name text NOT NULL,
+  category text NOT NULL,
+  notes text NOT NULL DEFAULT '',
+  status text NOT NULL DEFAULT 'Submitted' CHECK (status IN ('Submitted','Under review','Fulfilled')),
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS public.member_invitations (
+  email text PRIMARY KEY,
+  name text NOT NULL,
+  status text NOT NULL DEFAULT 'Pending' CHECK (status IN ('Pending','Accepted','Expired')),
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- Local browser state can be migrated into this table without exposing it to
+-- unauthenticated Data API clients. Server-side code uses the DB connection.
+CREATE TABLE IF NOT EXISTS public.dashboard_snapshots (
+  user_id uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  storage_key text NOT NULL CHECK (storage_key IN (
+    'ellextstore:v1:cart', 'ellextstore:v1:wishlist', 'ellextstore:v1:product-requests',
+    'ellextstore:v1:member-invitations', 'ellextstore:v1:currency-rows',
+    'ellextstore:v1:currency-rate', 'ellextstore:v1:product-increases',
+    'ellextstore:v1:selling-entries'
+  )),
+  payload jsonb NOT NULL,
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, storage_key)
+);
+
+ALTER TABLE public.currency_rows ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.product_increases ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.selling_entries ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.product_requests ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.member_invitations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.dashboard_snapshots ENABLE ROW LEVEL SECURITY;
+
+REVOKE ALL ON public.currency_rows, public.product_increases, public.selling_entries,
+  public.product_requests, public.member_invitations, public.dashboard_snapshots
+  FROM anon, authenticated;
+GRANT ALL ON public.currency_rows, public.product_increases, public.selling_entries,
+  public.product_requests, public.member_invitations, public.dashboard_snapshots TO service_role;
