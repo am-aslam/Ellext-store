@@ -2,8 +2,10 @@
 
 import { useEffect, useState, type FormEvent } from 'react';
 import Link from 'next/link';
+import { BrandLogo } from '@/components/brand-logo';
 import { ArrowLeft, Check, Copy, Database, FileSpreadsheet, FileText, LogOut, Plus, ReceiptText, ShieldCheck, X } from 'lucide-react';
-import { isStoredCurrencyRate, isStoredCurrencyRows, isStoredProductIncreases, isStoredSellingEntries, readVersioned, storageKeys, type CurrencyRateSnapshot, type CurrencyRow, type ProductIncrease, type SellingEntry } from '@/lib/storage';
+import { isStoredCurrencyRate, isStoredCurrencyRows, isStoredProductIncreases, isStoredSellingEntries, storageKeys, type CurrencyRateSnapshot, type CurrencyRow, type ProductIncrease, type SellingEntry } from '@/lib/storage';
+import { loadSharedDashboardValue } from '@/lib/shared-dashboard';
 
 type AdminAccount = { id: string; name: string; email: string; role: 'admin' };
 type AuthStatus = { mode: 'supabase' | 'sqlite'; supabaseConfigured: boolean };
@@ -24,11 +26,7 @@ type BackupRow = {
 type SalesBackup = { rows: BackupRow[]; rate: CurrencyRateSnapshot | null; totalSold: number; totalCollected: number | null; generatedAt: string };
 type ExportFormat = 'excel' | 'pdf';
 
-function readSalesBackup(): SalesBackup {
-  const products = readVersioned(storageKeys.currencyRows, isStoredCurrencyRows) ?? [];
-  const rate = readVersioned(storageKeys.currencyRate, isStoredCurrencyRate);
-  const increases = readVersioned(storageKeys.productIncreases, isStoredProductIncreases) ?? [];
-  const sales = readVersioned(storageKeys.sellingEntries, isStoredSellingEntries) ?? [];
+function makeSalesBackup(products: CurrencyRow[], rate: CurrencyRateSnapshot | null, increases: ProductIncrease[], sales: SellingEntry[]): SalesBackup {
   const productsById = new Map(products.map((product: CurrencyRow) => [product.id, product]));
   const increasesById = new Map(increases.map((increase: ProductIncrease) => [increase.sourceId, increase.increaseInr]));
   const latestSalesById = new Map<string, SellingEntry>();
@@ -90,11 +88,25 @@ export default function SuperAdminClient({ userName }: { userName: string }) {
   }
   useEffect(() => { void refresh(); }, []);
   useEffect(() => {
-    const updateBackup = () => setBackup(readSalesBackup());
-    updateBackup();
+    let active = true;
+    const updateBackup = async () => {
+      try {
+        const [products, rate, increases, sales] = await Promise.all([
+          loadSharedDashboardValue(storageKeys.currencyRows, isStoredCurrencyRows),
+          loadSharedDashboardValue(storageKeys.currencyRate, isStoredCurrencyRate),
+          loadSharedDashboardValue(storageKeys.productIncreases, isStoredProductIncreases),
+          loadSharedDashboardValue(storageKeys.sellingEntries, isStoredSellingEntries),
+        ]);
+        if (active) setBackup(makeSalesBackup(products ?? [], rate, increases ?? [], sales ?? []));
+      } catch (cause) {
+        if (active) setBackupError(cause instanceof Error ? `Shared sales data could not be loaded: ${cause.message}` : 'Shared sales data could not be loaded.');
+      }
+    };
+    void updateBackup();
     window.addEventListener('storage', updateBackup);
     window.addEventListener('focus', updateBackup);
-    return () => { window.removeEventListener('storage', updateBackup); window.removeEventListener('focus', updateBackup); };
+    const interval = window.setInterval(updateBackup, 15000);
+    return () => { active = false; window.removeEventListener('storage', updateBackup); window.removeEventListener('focus', updateBackup); window.clearInterval(interval); };
   }, []);
   async function createAdmin(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setError(''); setBusy(true);
@@ -192,7 +204,7 @@ export default function SuperAdminClient({ userName }: { userName: string }) {
   }
   const usingLocal = status?.mode === 'sqlite';
 
-  return <main className="admin-page"><header className="admin-topbar"><Link href="/" className="auth-brand">Ellext<span>Store</span><i /></Link><div><span className="admin-user"><ShieldCheck size={16} /> {userName} · Super Admin</span><Link href="/expense-ledger" className="admin-signout"><ReceiptText size={15} /> Expense Ledger</Link><button className="admin-signout" onClick={signOut}><LogOut size={15} /> Sign out</button></div></header>
+  return <main className="admin-page"><header className="admin-topbar"><Link href="/" className="auth-brand"><BrandLogo /></Link><div><span className="admin-user"><ShieldCheck size={16} /> {userName} · Super Admin</span><Link href="/expense-ledger" className="admin-signout"><ReceiptText size={15} /> Expense Ledger</Link><button className="admin-signout" onClick={signOut}><LogOut size={15} /> Sign out</button></div></header>
     <div className="admin-content"><Link href="/" className="admin-back"><ArrowLeft size={15} /> Dashboard</Link>
       <span className="auth-kicker">ELLEXTSTORE · ACCESS CONTROL</span><h1>Super Admin</h1><p className="admin-subtitle">Manage dashboard access and check the active data store.</p>
       <section className={`store-status ${usingLocal ? 'store-status-local' : 'store-status-online'}`} role="status"><span className="store-status-icon"><Database size={19} /></span><div><strong>{usingLocal ? (status?.supabaseConfigured ? 'Supabase is unavailable' : 'Supabase is not configured') : 'Supabase is connected'}</strong><p>{usingLocal ? 'The app is using the local SQLite database. Local account changes are saved on this device.' : 'Supabase is active. A local SQLite copy is maintained for sign-in fallback.'}</p></div><span className="store-status-pill">{usingLocal ? 'LOCAL DATABASE' : 'SUPABASE'}</span></section>

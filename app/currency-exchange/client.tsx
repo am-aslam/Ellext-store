@@ -2,10 +2,12 @@
 
 import Image from 'next/image';
 import Link from 'next/link';
+import { BrandLogo } from '@/components/brand-logo';
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from 'react';
 import { ArrowLeftRight, Archive, ChartNoAxesColumnIncreasing, Check, LayoutDashboard, LogOut, Pencil, Percent, Plus, ReceiptText, Trash2, Upload, X } from 'lucide-react';
 import { defaultProductCategories, isStoredCurrencyRate, isStoredCurrencyRows, isStoredSellingEntries, readVersioned, storageKeys, writeVersioned, type CurrencyRateSnapshot, type CurrencyRow } from '../../lib/storage';
 import { MobileFinanceNav } from '../../components/mobile-finance-nav';
+import { loadSharedDashboardValue, saveSharedDashboardValue } from '../../lib/shared-dashboard';
 
 type ExchangeApiResponse = { result?: string; base_code?: string; rates?: { INR?: number }; time_last_update_utc?: string };
 
@@ -38,14 +40,26 @@ export default function CurrencyExchangePage() {
   const cachedRate = useRef<CurrencyRateSnapshot | null>(null);
 
   useEffect(() => {
-    setRows(readVersioned(storageKeys.currencyRows, isStoredCurrencyRows) ?? []);
-    const savedCategories = readVersioned(storageKeys.productCategories, (value): value is string[] => Array.isArray(value) && value.every(item => typeof item === 'string')) ?? [];
-    setCategories([...defaultProductCategories, ...savedCategories.filter(item => !defaultProductCategories.includes(item))]);
-    const selling = readVersioned(storageKeys.sellingEntries, isStoredSellingEntries) ?? [];
-    setSoldById(Object.fromEntries(selling.map(item => [item.sourceId, item.soldCount])));
-    const cached = readVersioned(storageKeys.currencyRate, isStoredCurrencyRate);
-    if (cached) { setRate(cached); cachedRate.current = cached; }
-    setHydrated(true);
+    let active = true;
+    const load = async <T,>(key: typeof storageKeys.currencyRows | typeof storageKeys.currencyRate | typeof storageKeys.sellingEntries | typeof storageKeys.productCategories, validate: (value: unknown) => value is T, fallback: T): Promise<T> => {
+      try { return await loadSharedDashboardValue(key, validate) ?? fallback; }
+      catch { if (active) setNotice('Shared company data is unavailable. Showing saved data on this device.'); return readVersioned(key, validate) ?? fallback; }
+    };
+    void (async () => {
+      const [savedRows, savedCategories, selling, savedRate] = await Promise.all([
+        load(storageKeys.currencyRows, isStoredCurrencyRows, [] as CurrencyRow[]),
+        load(storageKeys.productCategories, (value): value is string[] => Array.isArray(value) && value.every(item => typeof item === 'string'), [] as string[]),
+        load(storageKeys.sellingEntries, isStoredSellingEntries, []),
+        load(storageKeys.currencyRate, isStoredCurrencyRate, null),
+      ]);
+      if (!active) return;
+      setRows(savedRows);
+      setCategories([...defaultProductCategories, ...savedCategories.filter(item => !defaultProductCategories.includes(item))]);
+      setSoldById(Object.fromEntries(selling.map(item => [item.sourceId, item.soldCount])));
+      if (savedRate) { setRate(savedRate); cachedRate.current = savedRate; }
+      setHydrated(true);
+    })();
+    return () => { active = false; };
   }, []);
 
   const refreshRate = useCallback(async () => {
@@ -63,6 +77,7 @@ export default function CurrencyExchangePage() {
       cachedRate.current = snapshot;
       setRateStatus('live');
       writeVersioned(storageKeys.currencyRate, snapshot);
+      void saveSharedDashboardValue(storageKeys.currencyRate, snapshot).catch(() => setNotice('Exchange rate could not sync to shared storage.'));
     } catch (cause) {
       setRateError(cause instanceof DOMException && cause.name === 'AbortError' ? 'Rate request timed out after 4 seconds.' : cause instanceof Error ? cause.message : 'Could not load the exchange rate');
       setRateStatus(cachedRate.current ? 'cached' : 'unavailable');
@@ -80,8 +95,9 @@ export default function CurrencyExchangePage() {
     return () => window.clearInterval(interval);
   }, [hydrated, refreshRate]);
 
-  useEffect(() => { if (hydrated) writeVersioned(storageKeys.currencyRows, rows); }, [hydrated, rows]);
-  useEffect(() => { if (hydrated) writeVersioned(storageKeys.productCategories, categories.filter(item => !defaultProductCategories.includes(item))); }, [hydrated, categories]);
+  useEffect(() => { if (hydrated) void saveSharedDashboardValue(storageKeys.currencyRows, rows).catch(() => setNotice('Product rows remain saved on this device but could not sync to shared storage.')); }, [hydrated, rows]);
+  useEffect(() => { if (hydrated) void saveSharedDashboardValue(storageKeys.productCategories, categories.filter(item => !defaultProductCategories.includes(item))).catch(() => setNotice('Categories remain saved on this device but could not sync to shared storage.')); }, [hydrated, categories]);
+  useEffect(() => { if (hydrated && rate) void saveSharedDashboardValue(storageKeys.currencyRate, rate).catch(() => setNotice('Exchange rate remains saved on this device but could not sync to shared storage.')); }, [hydrated, rate]);
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') { setModalOpen(false); setPreview(null); } };
     window.addEventListener('keydown', onKeyDown);
@@ -148,7 +164,7 @@ export default function CurrencyExchangePage() {
   return <main className="page-shell">
     <div className="dashboard currency-dashboard">
       <aside className="sidebar currency-sidebar">
-        <Link href="/" className="brand currency-brand">Ellext<span>Store</span><i /></Link>
+        <Link href="/" className="brand currency-brand"><BrandLogo /></Link>
         <nav className="primary-nav" aria-label="Main navigation">
           <Link className="nav-link" href="/"><LayoutDashboard size={19} strokeWidth={1.8} /><span>Dashboard</span></Link>
           <Link className="nav-link selected" href="/currency-exchange"><ArrowLeftRight size={19} strokeWidth={1.8} /><span>Currency Exchange</span></Link>
@@ -160,7 +176,7 @@ export default function CurrencyExchangePage() {
         <button className="logout currency-logout" onClick={signOut}><LogOut size={17} /> Sign out</button>
       </aside>
       <section className="main-panel currency-main">
-        <header className="currency-header"><div><div className="finance-mobile-topline"><MobileFinanceNav active="/currency-exchange" /><Link href="/" className="currency-mobile-home">Ellext<span>Store</span></Link></div><span className="currency-kicker">ELLEXTSTORE · FINANCE</span><h1>Currency Exchange</h1><p>Track product purchases in USD and their INR value.</p></div><button className="currency-add" onClick={openAdd}><Plus size={18} /> Add row</button></header>
+        <header className="currency-header"><div><div className="finance-mobile-topline"><MobileFinanceNav active="/currency-exchange" /><Link href="/" className="currency-mobile-home"><BrandLogo /></Link></div><span className="currency-kicker">ELLEXTSTORE · FINANCE</span><h1>Currency Exchange</h1><p>Track product purchases in USD and their INR value.</p></div><button className="currency-add" onClick={openAdd}><Plus size={18} /> Add row</button></header>
         <div className="currency-summary">
           <article><span>USD BUY VALUE</span><strong>{formatMoney(totals.usd, 'USD')}</strong><small>{totals.count.toLocaleString('en-IN')} products across active rows</small></article>
           <article><span>INR EXCHANGE VALUE</span><strong>{inrTotal === null ? '—' : formatMoney(inrTotal, 'INR')}</strong><small>Converted using the current USD to INR rate</small></article>

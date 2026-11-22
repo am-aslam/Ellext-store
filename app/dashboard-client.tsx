@@ -2,9 +2,11 @@
 
 import Image from 'next/image';
 import Link from 'next/link';
+import { BrandLogo } from '@/components/brand-logo';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { ArrowLeftRight, ChartNoAxesColumnIncreasing, LayoutDashboard, LogOut, Menu, Percent, ReceiptText, ShieldCheck, ShoppingBag, TrendingUp, X } from 'lucide-react';
-import { isStoredCurrencyRows, isStoredProductIncreases, isStoredSellingEntries, readVersioned, storageKeys, writeVersioned, type CurrencyRow } from '../lib/storage';
+import { isStoredCurrencyRows, isStoredProductIncreases, isStoredSellingEntries, readVersioned, storageKeys, type CurrencyRow, type ProductIncrease, type SellingEntry } from '../lib/storage';
+import { loadSharedDashboardValue } from '../lib/shared-dashboard';
 
 type DashboardSale = {
   row: CurrencyRow;
@@ -18,10 +20,8 @@ const emptyDashboard: DashboardData = { rows: [], sold: 0, available: 0, collect
 const formatInr = (amount: number) => new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 2 }).format(amount);
 const formatDate = (date: string) => new Intl.DateTimeFormat('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }).format(new Date(date));
 
-function readDashboardData(): DashboardData {
-  const currencyRows = (readVersioned(storageKeys.currencyRows, isStoredCurrencyRows) ?? []).filter(row => row.active);
-  const increases = readVersioned(storageKeys.productIncreases, isStoredProductIncreases) ?? [];
-  const sellingEntries = readVersioned(storageKeys.sellingEntries, isStoredSellingEntries) ?? [];
+function buildDashboardData(allRows: CurrencyRow[], increases: ProductIncrease[], sellingEntries: SellingEntry[]): DashboardData {
+  const currencyRows = allRows.filter(row => row.active);
   const increaseById = new Map(increases.map(item => [item.sourceId, item.increaseInr]));
   const saleById = new Map(sellingEntries.map(item => [item.sourceId, item]));
   const rows = currencyRows
@@ -46,7 +46,7 @@ function DashboardSidebar({ open, onClose, data, isSuperAdmin }: { open: boolean
   return <>
     {open && <button className="drawer-scrim" aria-label="Close navigation" onClick={onClose} />}
     <aside className={`sidebar dashboard-sidebar ${open ? 'sidebar-open' : ''}`}>
-      <Link href="/" className="brand dashboard-brand" onClick={onClose}>Ellext<span>Store</span><i /></Link>
+      <Link href="/" className="brand dashboard-brand" onClick={onClose}><BrandLogo /></Link>
       <nav className="primary-nav" aria-label="Main navigation">
         <Link className="nav-link selected" href="/" onClick={onClose}><LayoutDashboard size={19} /><span>Dashboard</span></Link>
         <Link className="nav-link" href="/currency-exchange" onClick={onClose}><ArrowLeftRight size={19} /><span>Currency Exchange</span></Link>
@@ -66,14 +66,27 @@ function DashboardSidebar({ open, onClose, data, isSuperAdmin }: { open: boolean
 export default function Dashboard({ isSuperAdmin }: { isSuperAdmin: boolean }) {
   const [data, setData] = useState<DashboardData>(emptyDashboard);
   const [menuOpen, setMenuOpen] = useState(false);
-  const reload = useCallback(() => setData(readDashboardData()), []);
+  const reload = useCallback(async () => {
+    const load = async <T,>(key: typeof storageKeys.currencyRows | typeof storageKeys.productIncreases | typeof storageKeys.sellingEntries, validate: (value: unknown) => value is T, fallback: T): Promise<T> => {
+      try { return await loadSharedDashboardValue(key, validate) ?? fallback; }
+      catch { return readVersioned(key, validate) ?? fallback; }
+    };
+    const [rows, increases, sales] = await Promise.all([
+      load(storageKeys.currencyRows, isStoredCurrencyRows, [] as CurrencyRow[]),
+      load(storageKeys.productIncreases, isStoredProductIncreases, [] as ProductIncrease[]),
+      load(storageKeys.sellingEntries, isStoredSellingEntries, [] as SellingEntry[]),
+    ]);
+    setData(buildDashboardData(rows, increases, sales));
+  }, []);
   useEffect(() => {
-    reload();
+    void reload();
     window.addEventListener('storage', reload);
     window.addEventListener('focus', reload);
+    const interval = window.setInterval(() => void reload(), 15000);
     return () => {
       window.removeEventListener('storage', reload);
       window.removeEventListener('focus', reload);
+      window.clearInterval(interval);
     };
   }, [reload]);
 

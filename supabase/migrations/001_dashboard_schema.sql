@@ -82,6 +82,18 @@ CREATE TABLE IF NOT EXISTS public.dashboard_snapshots (
   PRIMARY KEY (user_id, storage_key)
 );
 
+-- Shared company state is intentionally global across Admin and Super Admin
+-- accounts. Personal cart and wishlist remain in browser storage.
+CREATE TABLE IF NOT EXISTS public.dashboard_shared_state (
+  storage_key text PRIMARY KEY CHECK (storage_key IN (
+    'ellextstore:v1:currency-rows', 'ellextstore:v1:currency-rate',
+    'ellextstore:v1:product-increases', 'ellextstore:v1:selling-entries',
+    'ellextstore:v1:product-categories'
+  )),
+  payload jsonb NOT NULL,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
 ALTER TABLE public.currency_rows ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.product_increases ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.selling_entries ENABLE ROW LEVEL SECURITY;
@@ -91,11 +103,12 @@ ALTER TABLE public.product_categories ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.company_expenses ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.expense_ledger ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.dashboard_snapshots ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.dashboard_shared_state ENABLE ROW LEVEL SECURITY;
 
 REVOKE ALL ON public.currency_rows, public.product_increases, public.selling_entries,
   public.product_requests, public.member_invitations, public.product_categories,
-  public.company_expenses, public.expense_ledger, public.dashboard_snapshots
+  public.company_expenses, public.expense_ledger, public.dashboard_snapshots, public.dashboard_shared_state
   FROM anon, authenticated;
 GRANT ALL ON public.currency_rows, public.product_increases, public.selling_entries,
   public.product_requests, public.member_invitations, public.product_categories,
-  public.company_expenses, public.expense_ledger, public.dashboard_snapshots TO service_role;
+  public.company_expenses, public.expense_ledger, public.dashboard_snapshots, public.dashboard_shared_state TO service_role;

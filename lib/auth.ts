@@ -51,6 +51,7 @@ function db(): Database.Database {
     CREATE TABLE IF NOT EXISTS company_expenses (id TEXT PRIMARY KEY, amount_inr REAL NOT NULL CHECK(amount_inr > 0), note TEXT NOT NULL, expense_date TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
     CREATE TABLE IF NOT EXISTS expense_ledger (id TEXT PRIMARY KEY, amount_inr REAL NOT NULL CHECK(amount_inr > 0), category TEXT NOT NULL DEFAULT 'Other', note TEXT NOT NULL, expense_date TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, created_by TEXT NOT NULL DEFAULT '');
     CREATE TABLE IF NOT EXISTS dashboard_snapshots (user_id TEXT NOT NULL, storage_key TEXT NOT NULL, payload TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(user_id,storage_key));
+    CREATE TABLE IF NOT EXISTS dashboard_shared_state (storage_key TEXT PRIMARY KEY, payload TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
   `);
   if (!database.prepare('PRAGMA table_info(currency_rows)').all().some(column => (column as { name?: string }).name === 'category')) {
     database.exec("ALTER TABLE currency_rows ADD COLUMN category TEXT NOT NULL DEFAULT 'Ring'");
@@ -215,13 +216,41 @@ export function clearSession(token: string | undefined) {
 }
 export function getAuthDataStore() { return db(); }
 
+export async function readSharedDashboardValue(storageKey: string): Promise<unknown | null> {
+  if (await getStorageMode() === 'supabase') {
+    const client = getSupabaseAdmin();
+    if (!client) throw new Error('Supabase service key is not configured.');
+    const { data, error } = await client.from('dashboard_shared_state').select('payload').eq('storage_key', storageKey).maybeSingle();
+    if (error) throw new Error(`Unable to load shared dashboard data: ${error.message}`);
+    if (data) return data.payload;
+  }
+  const record = db().prepare('SELECT payload FROM dashboard_shared_state WHERE storage_key=?').get(storageKey) as { payload: string } | undefined;
+  if (!record) return null;
+  try { return JSON.parse(record.payload) as unknown; }
+  catch { db().prepare('DELETE FROM dashboard_shared_state WHERE storage_key=?').run(storageKey); return null; }
+}
+
+export async function writeSharedDashboardValue(storageKey: string, payload: unknown): Promise<void> {
+  const serialized = JSON.stringify(payload);
+  if (await getStorageMode() === 'supabase') {
+    const client = getSupabaseAdmin();
+    if (!client) throw new Error('Supabase service key is not configured.');
+    const { error } = await client.from('dashboard_shared_state').upsert({ storage_key: storageKey, payload, updated_at: new Date().toISOString() }, { onConflict: 'storage_key' });
+    if (error) throw new Error(`Unable to save shared dashboard data: ${error.message}`);
+  }
+  db().prepare(`INSERT INTO dashboard_shared_state(storage_key,payload,updated_at) VALUES(?,?,?)
+    ON CONFLICT(storage_key) DO UPDATE SET payload=excluded.payload,updated_at=excluded.updated_at`).run(storageKey, serialized, new Date().toISOString());
+}
+
 
 export type LedgerRecord = { id: string; amount: number; category: string; note: string; date: string; createdBy: string };
 function expensePool(): Pool | null {
   const connectionString = process.env.SUPABASE_DB_URL?.trim();
   if (!connectionString) return null;
   if (!globalForDb.ellextExpensePool) {
-    globalForDb.ellextExpensePool = new Pool({ connectionString, ssl: { rejectUnauthorized: false }, max: 2, connectionTimeoutMillis: 2500, query_timeout: 4000 });
+    const databaseHost = new URL(connectionString).hostname;
+    const ssl = ['localhost', '127.0.0.1', '::1'].includes(databaseHost) ? false : { rejectUnauthorized: false };
+    globalForDb.ellextExpensePool = new Pool({ connectionString, ssl, max: 2, connectionTimeoutMillis: 2500, query_timeout: 4000 });
   }
   return globalForDb.ellextExpensePool;
 }
@@ -248,53 +277,59 @@ async function ensureExpenseTable(pool: Pool): Promise<boolean> {
   return ready;
 }
 export async function readExpenseLedger(): Promise<LedgerRecord[]> {
+  const storageMode = await getStorageMode();
   const pool = expensePool();
-  if (pool && await ensureExpenseTable(pool)) {
+  if (storageMode === 'supabase' && pool && await ensureExpenseTable(pool)) {
     try {
       const { rows } = await pool.query('SELECT id,amount_inr,category,note,expense_date,created_by FROM public.expense_ledger ORDER BY expense_date DESC');
       return rows.map(row => ({ id: row.id, amount: Number(row.amount_inr), category: row.category, note: row.note, date: new Date(row.expense_date).toISOString(), createdBy: row.created_by ?? '' }));
     } catch { /* Fall through to the Supabase REST and SQLite stores. */ }
   }
-  if (await getStorageMode() === 'supabase') {
+  if (storageMode === 'supabase') {
     const client = getSupabaseAdmin();
-    if (client) {
-      const { data, error } = await client.from('expense_ledger').select('id,amount_inr,category,note,expense_date,created_by').order('expense_date', { ascending: false });
-      if (!error) return (data ?? []).map(row => ({ id: row.id, amount: Number(row.amount_inr), category: row.category, note: row.note, date: row.expense_date, createdBy: row.created_by ?? '' }));
-    }
+    if (!client) throw new Error('Supabase service key is not configured.');
+    const { data, error } = await client.from('expense_ledger').select('id,amount_inr,category,note,expense_date,created_by').order('expense_date', { ascending: false });
+    if (error) throw new Error(`Unable to load Expense Ledger: ${error.message}`);
+    const entries = (data ?? []).map(row => ({ id: row.id, amount: Number(row.amount_inr), category: row.category, note: row.note, date: row.expense_date, createdBy: row.created_by ?? '' }));
+    const write = db().prepare(`INSERT INTO expense_ledger(id,amount_inr,category,note,expense_date,created_by) VALUES(?,?,?,?,?,?)
+      ON CONFLICT(id) DO UPDATE SET amount_inr=excluded.amount_inr,category=excluded.category,note=excluded.note,expense_date=excluded.expense_date,created_by=excluded.created_by`);
+    const sync = db().transaction((rows: LedgerRecord[]) => rows.forEach(row => write.run(row.id,row.amount,row.category,row.note,row.date,row.createdBy)));
+    sync(entries);
+    return entries;
   }
   return db().prepare('SELECT id,amount_inr as amount,category,note,expense_date as date,created_by as createdBy FROM expense_ledger ORDER BY expense_date DESC').all() as LedgerRecord[];
 }
 export async function addExpenseLedgerRecord(record: LedgerRecord) {
+  const storageMode = await getStorageMode();
   const pool = expensePool();
-  if (pool && await ensureExpenseTable(pool)) {
+  if (storageMode === 'supabase' && pool && await ensureExpenseTable(pool)) {
     try {
       await pool.query(`INSERT INTO public.expense_ledger(id,amount_inr,category,note,expense_date,created_by) VALUES($1,$2,$3,$4,$5,$6)
         ON CONFLICT(id) DO UPDATE SET amount_inr=EXCLUDED.amount_inr,category=EXCLUDED.category,note=EXCLUDED.note,expense_date=EXCLUDED.expense_date,created_by=EXCLUDED.created_by`, [record.id, record.amount, record.category, record.note, record.date, record.createdBy]);
       return;
     } catch { /* Fall through to the Supabase REST and SQLite stores. */ }
   }
-  if (await getStorageMode() === 'supabase') {
+  if (storageMode === 'supabase') {
     const client = getSupabaseAdmin();
-    if (client) {
-      const { error } = await client.from('expense_ledger').upsert({ id: record.id, amount_inr: record.amount, category: record.category, note: record.note, expense_date: record.date, created_by: record.createdBy }, { onConflict: 'id' });
-      if (!error) return;
-    }
+    if (!client) throw new Error('Supabase service key is not configured.');
+    const { error } = await client.from('expense_ledger').upsert({ id: record.id, amount_inr: record.amount, category: record.category, note: record.note, expense_date: record.date, created_by: record.createdBy }, { onConflict: 'id' });
+    if (error) throw new Error(`Unable to save Expense Ledger entry: ${error.message}`);
   }
   db().prepare(`INSERT INTO expense_ledger(id,amount_inr,category,note,expense_date,created_by) VALUES(?,?,?,?,?,?)
     ON CONFLICT(id) DO UPDATE SET amount_inr=excluded.amount_inr,category=excluded.category,note=excluded.note,expense_date=excluded.expense_date,created_by=excluded.created_by`).run(record.id, record.amount, record.category, record.note, record.date, record.createdBy);
 }
 export async function deleteExpenseLedgerRecord(id: string) {
+  const storageMode = await getStorageMode();
   const pool = expensePool();
-  if (pool && await ensureExpenseTable(pool)) {
+  if (storageMode === 'supabase' && pool && await ensureExpenseTable(pool)) {
     try { await pool.query('DELETE FROM public.expense_ledger WHERE id=$1', [id]); return; }
     catch { /* Fall through to the Supabase REST and SQLite stores. */ }
   }
-  if (await getStorageMode() === 'supabase') {
+  if (storageMode === 'supabase') {
     const client = getSupabaseAdmin();
-    if (client) {
-      const { error } = await client.from('expense_ledger').delete().eq('id', id);
-      if (!error) return;
-    }
+    if (!client) throw new Error('Supabase service key is not configured.');
+    const { error } = await client.from('expense_ledger').delete().eq('id', id);
+    if (error) throw new Error(`Unable to remove Expense Ledger entry: ${error.message}`);
   }
   db().prepare('DELETE FROM expense_ledger WHERE id=?').run(id);
 }

@@ -2,10 +2,12 @@
 
 import Image from 'next/image';
 import Link from 'next/link';
+import { BrandLogo } from '@/components/brand-logo';
 import { useEffect, useMemo, useState } from 'react';
 import { ArrowLeftRight, ChartNoAxesColumnIncreasing, Check, LayoutDashboard, LockKeyhole, LogOut, Pencil, Percent, ReceiptText, UnlockKeyhole } from 'lucide-react';
-import { isStoredCurrencyRate, isStoredCurrencyRows, isStoredProductIncreases, readVersioned, storageKeys, writeVersioned, type CurrencyRateSnapshot, type CurrencyRow, type ProductIncrease } from '../../lib/storage';
+import { isStoredCurrencyRate, isStoredCurrencyRows, isStoredProductIncreases, readVersioned, storageKeys, type CurrencyRateSnapshot, type CurrencyRow, type ProductIncrease } from '../../lib/storage';
 import { MobileFinanceNav } from '../../components/mobile-finance-nav';
+import { loadSharedDashboardValue, saveSharedDashboardValue } from '../../lib/shared-dashboard';
 
 const formatMoney = (amount: number) => new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 2 }).format(amount);
 const formatDate = (date: string) => new Intl.DateTimeFormat('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }).format(new Date(date));
@@ -23,12 +25,23 @@ export default function ProductPercentagePage() {
   const signOut = async () => { await fetch('/api/auth/sign-out', { method: 'POST' }); window.location.assign('/sign-in'); };
 
   useEffect(() => {
-    setSourceRows(readVersioned(storageKeys.currencyRows, isStoredCurrencyRows) ?? []);
-    setRate(readVersioned(storageKeys.currencyRate, isStoredCurrencyRate));
-    setIncreases(readVersioned(storageKeys.productIncreases, isStoredProductIncreases) ?? []);
-    setHydrated(true);
+    let active = true;
+    const load = async <T,>(key: typeof storageKeys.currencyRows | typeof storageKeys.currencyRate | typeof storageKeys.productIncreases, validate: (value: unknown) => value is T, fallback: T): Promise<T> => {
+      try { return await loadSharedDashboardValue(key, validate) ?? fallback; }
+      catch { if (active) setNotice('Shared company data is unavailable. Showing saved data on this device.'); return readVersioned(key, validate) ?? fallback; }
+    };
+    void (async () => {
+      const [rows, savedRate, savedIncreases] = await Promise.all([
+        load(storageKeys.currencyRows, isStoredCurrencyRows, [] as CurrencyRow[]),
+        load(storageKeys.currencyRate, isStoredCurrencyRate, null),
+        load(storageKeys.productIncreases, isStoredProductIncreases, [] as ProductIncrease[]),
+      ]);
+      if (!active) return;
+      setSourceRows(rows); setRate(savedRate); setIncreases(savedIncreases); setHydrated(true);
+    })();
+    return () => { active = false; };
   }, []);
-  useEffect(() => { if (hydrated) writeVersioned(storageKeys.productIncreases, increases); }, [hydrated, increases]);
+  useEffect(() => { if (hydrated) void saveSharedDashboardValue(storageKeys.productIncreases, increases).catch(() => setNotice('Pricing remains saved on this device but could not sync to shared storage.')); }, [hydrated, increases]);
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') setPreview(null); };
     window.addEventListener('keydown', onKeyDown);
@@ -71,7 +84,7 @@ export default function ProductPercentagePage() {
   return <main className="page-shell">
     <div className="dashboard currency-dashboard percentage-dashboard">
       <aside className="sidebar currency-sidebar">
-        <Link href="/" className="brand currency-brand">Ellext<span>Store</span><i /></Link>
+        <Link href="/" className="brand currency-brand"><BrandLogo /></Link>
         <nav className="primary-nav" aria-label="Main navigation">
           <Link className="nav-link" href="/"><LayoutDashboard size={19} strokeWidth={1.8} /><span>Dashboard</span></Link>
           <Link className="nav-link" href="/currency-exchange"><ArrowLeftRight size={19} strokeWidth={1.8} /><span>Currency Exchange</span></Link>
@@ -84,7 +97,7 @@ export default function ProductPercentagePage() {
       </aside>
 
       <section className="main-panel currency-main percentage-main">
-        <header className="currency-header"><div><div className="finance-mobile-topline"><MobileFinanceNav active="/product-percentage" /><Link href="/" className="currency-mobile-home">Ellext<span>Store</span></Link></div><span className="currency-kicker">ELLEXTSTORE · PRICING</span><h1>Product Percentage</h1><p>Set the company selling amount for each product.</p></div></header>
+        <header className="currency-header"><div><div className="finance-mobile-topline"><MobileFinanceNav active="/product-percentage" /><Link href="/" className="currency-mobile-home"><BrandLogo /></Link></div><span className="currency-kicker">ELLEXTSTORE · PRICING</span><h1>Product Percentage</h1><p>Set the company selling amount for each product.</p></div></header>
         <div className="percentage-rate-note"><span className="rate-dot live" /><span>{rate ? `INR purchase values use 1 USD = ${rate.usdToInr.toFixed(4)} INR` : 'INR exchange rate has not been loaded yet'}</span><Link href="/currency-exchange">Manage currency exchange <ArrowLeftRight size={13} /></Link></div>
         <div className="currency-table-heading"><div><h2>Product pricing rows</h2><p>{rows.length} active product {rows.length === 1 ? 'row' : 'rows'} from Currency Exchange</p></div></div>
         {rows.length > 0 ? <><div className="currency-table-wrap percentage-table-wrap percentage-desktop-table"><table className="currency-table percentage-table"><thead><tr><th>Date</th><th>Image</th><th>Description</th><th>INR buy value</th><th>Company amount</th><th>Selling price (auto)</th><th>Increase share (of 100%)</th><th>Actions</th></tr></thead>

@@ -1,6 +1,7 @@
 'use client';
 
 import Link from 'next/link';
+import { BrandLogo } from '@/components/brand-logo';
 import { useEffect, useState } from 'react';
 import { ArrowLeftRight, ChartNoAxesColumnIncreasing, LayoutDashboard, Menu, Percent, ReceiptText, TrendingUp, X } from 'lucide-react';
 
@@ -35,7 +36,7 @@ export function MobileFinanceNav({ active }: { active: FinanceRoute }) {
       <button className="finance-mobile-scrim" type="button" aria-label="Close navigation" onClick={() => setOpen(false)} />
       <aside className="finance-mobile-drawer" role="dialog" aria-modal="true" aria-label="Main navigation">
         <div className="finance-mobile-drawer-head">
-          <Link href="/" className="brand currency-brand" onClick={() => setOpen(false)}>Ellext<span>Store</span><i /></Link>
+          <Link href="/" className="brand currency-brand" onClick={() => setOpen(false)}><BrandLogo /></Link>
           <button className="finance-mobile-close" type="button" aria-label="Close navigation" onClick={() => setOpen(false)}><X size={19} /></button>
         </div>
         <nav className="primary-nav" aria-label="Main navigation">

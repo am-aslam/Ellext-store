@@ -1,0 +1,1 @@
+-- Optional local seed data. The dashboard starts with empty records.

@@ -2,6 +2,7 @@
 
 import { FormEvent, useEffect, useState } from 'react';
 import Link from 'next/link';
+import { BrandLogo } from '@/components/brand-logo';
 import { ArrowRight, ShieldCheck } from 'lucide-react';
 
 type AuthStatus = { setupComplete: boolean; mode: 'supabase' | 'sqlite'; supabaseConfigured: boolean };
@@ -28,7 +29,7 @@ export default function SignInPage() {
 
   return <main className="auth-page"><div className="auth-accent auth-accent-one" /><div className="auth-accent auth-accent-two" />
     <section className="auth-card" aria-labelledby="signin-title">
-      <Link href="/sign-in" className="auth-brand">Ellext<span>Store</span><i /></Link>
+      <Link href="/sign-in" className="auth-brand"><BrandLogo /></Link>
       <span className="auth-kicker">SECURE DASHBOARD ACCESS</span><h1 id="signin-title">Welcome back</h1><p className="auth-intro">Sign in to manage products, exchange values, and sales.</p>
       {status?.mode === 'sqlite' && status.supabaseConfigured && <div className="auth-fallback" role="status"><span /> Supabase is unavailable. Using local database.</div>}
       {!status?.setupComplete && <div className="auth-first-run"><ShieldCheck size={18} /><span>Set up your first Super Admin account to get started.</span><Link href="/sign-up">Set up <ArrowRight size={14} /></Link></div>}

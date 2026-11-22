@@ -2,10 +2,12 @@
 
 import Image from 'next/image';
 import Link from 'next/link';
+import { BrandLogo } from '@/components/brand-logo';
 import { useEffect, useMemo, useState } from 'react';
 import { ArrowLeftRight, Check, ChartNoAxesColumnIncreasing, LayoutDashboard, LockKeyhole, LogOut, Percent, Plus, ReceiptText, UnlockKeyhole, X } from 'lucide-react';
-import { isStoredCurrencyRows, isStoredProductIncreases, isStoredSellingEntries, readVersioned, storageKeys, writeVersioned, type CurrencyRow, type ProductIncrease, type SellingEntry } from '../../lib/storage';
+import { isStoredCurrencyRows, isStoredProductIncreases, isStoredSellingEntries, readVersioned, storageKeys, type CurrencyRow, type ProductIncrease, type SellingEntry } from '../../lib/storage';
 import { MobileFinanceNav } from '../../components/mobile-finance-nav';
+import { loadSharedDashboardValue, saveSharedDashboardValue } from '../../lib/shared-dashboard';
 
 const formatMoney = (amount: number) => new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 2 }).format(amount);
 const formatDate = (date: string) => new Intl.DateTimeFormat('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }).format(new Date(date));
@@ -23,14 +25,25 @@ export default function SellingDetailsPage() {
   const signOut = async () => { await fetch('/api/auth/sign-out', { method: 'POST' }); window.location.assign('/sign-in'); };
 
   useEffect(() => {
-    setSourceRows(readVersioned(storageKeys.currencyRows, isStoredCurrencyRows) ?? []);
-    setIncreases(readVersioned(storageKeys.productIncreases, isStoredProductIncreases) ?? []);
-    const stored = readVersioned(storageKeys.sellingEntries, isStoredSellingEntries) ?? [];
-    setEntries(stored);
-    setDrafts(Object.fromEntries(stored.map(entry => [entry.sourceId, String(entry.soldCount)])));
-    setHydrated(true);
+    let active = true;
+    const load = async <T,>(key: typeof storageKeys.currencyRows | typeof storageKeys.productIncreases | typeof storageKeys.sellingEntries, validate: (value: unknown) => value is T, fallback: T): Promise<T> => {
+      try { return await loadSharedDashboardValue(key, validate) ?? fallback; }
+      catch { if (active) setNotice('Shared company data is unavailable. Showing saved data on this device.'); return readVersioned(key, validate) ?? fallback; }
+    };
+    void (async () => {
+      const [rows, savedIncreases, savedEntries] = await Promise.all([
+        load(storageKeys.currencyRows, isStoredCurrencyRows, [] as CurrencyRow[]),
+        load(storageKeys.productIncreases, isStoredProductIncreases, [] as ProductIncrease[]),
+        load(storageKeys.sellingEntries, isStoredSellingEntries, [] as SellingEntry[]),
+      ]);
+      if (!active) return;
+      setSourceRows(rows); setIncreases(savedIncreases); setEntries(savedEntries);
+      setDrafts(Object.fromEntries(savedEntries.map(entry => [entry.sourceId, String(entry.soldCount)])));
+      setHydrated(true);
+    })();
+    return () => { active = false; };
   }, []);
-  useEffect(() => { if (hydrated) writeVersioned(storageKeys.sellingEntries, entries); }, [hydrated, entries]);
+  useEffect(() => { if (hydrated) void saveSharedDashboardValue(storageKeys.sellingEntries, entries).catch(() => setNotice('Sales remain saved on this device but could not sync to shared storage.')); }, [hydrated, entries]);
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') setPreview(null); };
     window.addEventListener('keydown', onKeyDown);
@@ -79,7 +92,7 @@ export default function SellingDetailsPage() {
   return <main className="page-shell">
     <div className="dashboard currency-dashboard selling-dashboard">
       <aside className="sidebar currency-sidebar">
-        <Link href="/" className="brand currency-brand">Ellext<span>Store</span><i /></Link>
+        <Link href="/" className="brand currency-brand"><BrandLogo /></Link>
         <nav className="primary-nav" aria-label="Main navigation">
           <Link className="nav-link" href="/"><LayoutDashboard size={19} strokeWidth={1.8} /><span>Dashboard</span></Link>
           <Link className="nav-link" href="/currency-exchange"><ArrowLeftRight size={19} strokeWidth={1.8} /><span>Currency Exchange</span></Link>
@@ -92,7 +105,7 @@ export default function SellingDetailsPage() {
       </aside>
 
       <section className="main-panel currency-main selling-main">
-        <header className="currency-header"><div><div className="finance-mobile-topline"><MobileFinanceNav active="/selling-details" /><Link href="/" className="currency-mobile-home">Ellext<span>Store</span></Link></div><span className="currency-kicker">ELLEXTSTORE · SALES</span><h1>Selling Details</h1><p>Record sold items and collected amounts.</p></div><Link href="/expense-ledger" className="currency-add"><Plus size={17}/> Expense ledger</Link></header>
+        <header className="currency-header"><div><div className="finance-mobile-topline"><MobileFinanceNav active="/selling-details" /><Link href="/" className="currency-mobile-home"><BrandLogo /></Link></div><span className="currency-kicker">ELLEXTSTORE · SALES</span><h1>Selling Details</h1><p>Record sold items and collected amounts.</p></div><Link href="/expense-ledger" className="currency-add"><Plus size={17}/> Expense ledger</Link></header>
         <div className="selling-summary">
           <article><span>SOLD ITEMS</span><strong>{totals.sold.toLocaleString('en-IN')}</strong><small>of {rows.reduce((sum, row) => sum + row.productCount, 0).toLocaleString('en-IN')} active products</small></article>
           <article><span>COLLECTED AMOUNT</span><strong>{totals.hasPrice ? formatMoney(totals.collected) : '—'}</strong><small>Sold count × company selling amount</small></article>
