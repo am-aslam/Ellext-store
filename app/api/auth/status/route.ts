@@ -6,5 +6,5 @@ export const dynamic = 'force-dynamic';
 
 export async function GET() {
   const mode = await getStorageMode();
-  return NextResponse.json({ setupComplete: await hasSuperAdmin(), mode, supabaseConfigured: isSupabaseConfigured() });
+  return NextResponse.json({ setupComplete: await hasSuperAdmin(), mode, supabaseConfigured: isSupabaseConfigured(), deployment: process.env.VERCEL ? 'vercel' : 'local' });
 }

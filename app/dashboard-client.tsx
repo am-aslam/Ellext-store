@@ -66,10 +66,12 @@ function DashboardSidebar({ open, onClose, data, isSuperAdmin }: { open: boolean
 export default function Dashboard({ isSuperAdmin }: { isSuperAdmin: boolean }) {
   const [data, setData] = useState<DashboardData>(emptyDashboard);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [syncWarning, setSyncWarning] = useState('');
   const reload = useCallback(async () => {
+    let sharedReadFailed = false;
     const load = async <T,>(key: typeof storageKeys.currencyRows | typeof storageKeys.productIncreases | typeof storageKeys.sellingEntries, validate: (value: unknown) => value is T, fallback: T): Promise<T> => {
       try { return await loadSharedDashboardValue(key, validate) ?? fallback; }
-      catch { return readVersioned(key, validate) ?? fallback; }
+      catch { sharedReadFailed = true; return readVersioned(key, validate) ?? fallback; }
     };
     const [rows, increases, sales] = await Promise.all([
       load(storageKeys.currencyRows, isStoredCurrencyRows, [] as CurrencyRow[]),
@@ -77,6 +79,7 @@ export default function Dashboard({ isSuperAdmin }: { isSuperAdmin: boolean }) {
       load(storageKeys.sellingEntries, isStoredSellingEntries, [] as SellingEntry[]),
     ]);
     setData(buildDashboardData(rows, increases, sales));
+    setSyncWarning(sharedReadFailed ? 'Shared company data could not be reached. This dashboard is showing data saved in this browser only; other accounts will not see unsynced changes.' : '');
   }, []);
   useEffect(() => {
     void reload();
@@ -106,6 +109,7 @@ export default function Dashboard({ isSuperAdmin }: { isSuperAdmin: boolean }) {
           <div className="dashboard-heading"><span className="currency-kicker">ELLEXTSTORE · SALES OVERVIEW</span><h1>Dashboard</h1><p>Sales performance from your Selling Details.</p></div>
           <Link href="/selling-details" className="dashboard-view-sales"><ChartNoAxesColumnIncreasing size={16} /> View selling details</Link>
         </header>
+        {syncWarning && <div className="dashboard-sync-warning" role="alert"><strong>Company data is not syncing</strong><span>{syncWarning}</span>{isSuperAdmin && <Link href="/super-admin">Check Supabase status</Link>}</div>}
 
         <section className="dashboard-kpis" aria-label="Sales summary">
           <article className="dashboard-kpi"><span>COLLECTED AMOUNT</span><strong>{data.collected === null ? '—' : formatInr(data.collected)}</strong><small>{data.collected === null ? 'Set company selling amounts in Product Percentage' : 'Sold items × company selling amount'}</small></article>

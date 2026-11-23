@@ -88,6 +88,15 @@ export async function getStorageMode(): Promise<StorageMode> {
     return response.ok ? 'supabase' : 'sqlite';
   } catch { return 'sqlite'; }
 }
+async function getCompanyDataStorageMode(): Promise<StorageMode> {
+  const mode = await getStorageMode();
+  // Vercel function filesystems and /tmp are instance-local and ephemeral, so
+  // they cannot act as a shared company database for Admin and Super Admin.
+  if (process.env.VERCEL && mode !== 'supabase') {
+    throw new Error('Shared Supabase storage is unavailable. This Vercel deployment cannot use SQLite as shared storage; check the Supabase URL and service role key.');
+  }
+  return mode;
+}
 async function listSupabaseUsers(): Promise<AppUser[]> {
   const client = getSupabaseAdmin();
   if (!client) return [];
@@ -217,12 +226,15 @@ export function clearSession(token: string | undefined) {
 export function getAuthDataStore() { return db(); }
 
 export async function readSharedDashboardValue(storageKey: string): Promise<unknown | null> {
-  if (await getStorageMode() === 'supabase') {
+  if (await getCompanyDataStorageMode() === 'supabase') {
     const client = getSupabaseAdmin();
     if (!client) throw new Error('Supabase service key is not configured.');
     const { data, error } = await client.from('dashboard_shared_state').select('payload').eq('storage_key', storageKey).maybeSingle();
     if (error) throw new Error(`Unable to load shared dashboard data: ${error.message}`);
     if (data) return data.payload;
+    // Supabase is the source of truth in production. Ignore per-instance
+    // SQLite snapshots there, since they may belong to a different function.
+    if (process.env.VERCEL) return null;
   }
   const record = db().prepare('SELECT payload FROM dashboard_shared_state WHERE storage_key=?').get(storageKey) as { payload: string } | undefined;
   if (!record) return null;
@@ -232,11 +244,12 @@ export async function readSharedDashboardValue(storageKey: string): Promise<unkn
 
 export async function writeSharedDashboardValue(storageKey: string, payload: unknown): Promise<void> {
   const serialized = JSON.stringify(payload);
-  if (await getStorageMode() === 'supabase') {
+  if (await getCompanyDataStorageMode() === 'supabase') {
     const client = getSupabaseAdmin();
     if (!client) throw new Error('Supabase service key is not configured.');
     const { error } = await client.from('dashboard_shared_state').upsert({ storage_key: storageKey, payload, updated_at: new Date().toISOString() }, { onConflict: 'storage_key' });
     if (error) throw new Error(`Unable to save shared dashboard data: ${error.message}`);
+    if (process.env.VERCEL) return;
   }
   db().prepare(`INSERT INTO dashboard_shared_state(storage_key,payload,updated_at) VALUES(?,?,?)
     ON CONFLICT(storage_key) DO UPDATE SET payload=excluded.payload,updated_at=excluded.updated_at`).run(storageKey, serialized, new Date().toISOString());
@@ -277,7 +290,7 @@ async function ensureExpenseTable(pool: Pool): Promise<boolean> {
   return ready;
 }
 export async function readExpenseLedger(): Promise<LedgerRecord[]> {
-  const storageMode = await getStorageMode();
+  const storageMode = await getCompanyDataStorageMode();
   const pool = expensePool();
   if (storageMode === 'supabase' && pool && await ensureExpenseTable(pool)) {
     try {
@@ -291,16 +304,18 @@ export async function readExpenseLedger(): Promise<LedgerRecord[]> {
     const { data, error } = await client.from('expense_ledger').select('id,amount_inr,category,note,expense_date,created_by').order('expense_date', { ascending: false });
     if (error) throw new Error(`Unable to load Expense Ledger: ${error.message}`);
     const entries = (data ?? []).map(row => ({ id: row.id, amount: Number(row.amount_inr), category: row.category, note: row.note, date: row.expense_date, createdBy: row.created_by ?? '' }));
-    const write = db().prepare(`INSERT INTO expense_ledger(id,amount_inr,category,note,expense_date,created_by) VALUES(?,?,?,?,?,?)
-      ON CONFLICT(id) DO UPDATE SET amount_inr=excluded.amount_inr,category=excluded.category,note=excluded.note,expense_date=excluded.expense_date,created_by=excluded.created_by`);
-    const sync = db().transaction((rows: LedgerRecord[]) => rows.forEach(row => write.run(row.id,row.amount,row.category,row.note,row.date,row.createdBy)));
-    sync(entries);
+    if (!process.env.VERCEL) {
+      const write = db().prepare(`INSERT INTO expense_ledger(id,amount_inr,category,note,expense_date,created_by) VALUES(?,?,?,?,?,?)
+        ON CONFLICT(id) DO UPDATE SET amount_inr=excluded.amount_inr,category=excluded.category,note=excluded.note,expense_date=excluded.expense_date,created_by=excluded.created_by`);
+      const sync = db().transaction((rows: LedgerRecord[]) => rows.forEach(row => write.run(row.id,row.amount,row.category,row.note,row.date,row.createdBy)));
+      sync(entries);
+    }
     return entries;
   }
   return db().prepare('SELECT id,amount_inr as amount,category,note,expense_date as date,created_by as createdBy FROM expense_ledger ORDER BY expense_date DESC').all() as LedgerRecord[];
 }
 export async function addExpenseLedgerRecord(record: LedgerRecord) {
-  const storageMode = await getStorageMode();
+  const storageMode = await getCompanyDataStorageMode();
   const pool = expensePool();
   if (storageMode === 'supabase' && pool && await ensureExpenseTable(pool)) {
     try {
@@ -315,11 +330,12 @@ export async function addExpenseLedgerRecord(record: LedgerRecord) {
     const { error } = await client.from('expense_ledger').upsert({ id: record.id, amount_inr: record.amount, category: record.category, note: record.note, expense_date: record.date, created_by: record.createdBy }, { onConflict: 'id' });
     if (error) throw new Error(`Unable to save Expense Ledger entry: ${error.message}`);
   }
+  if (process.env.VERCEL && storageMode === 'supabase') return;
   db().prepare(`INSERT INTO expense_ledger(id,amount_inr,category,note,expense_date,created_by) VALUES(?,?,?,?,?,?)
     ON CONFLICT(id) DO UPDATE SET amount_inr=excluded.amount_inr,category=excluded.category,note=excluded.note,expense_date=excluded.expense_date,created_by=excluded.created_by`).run(record.id, record.amount, record.category, record.note, record.date, record.createdBy);
 }
 export async function deleteExpenseLedgerRecord(id: string) {
-  const storageMode = await getStorageMode();
+  const storageMode = await getCompanyDataStorageMode();
   const pool = expensePool();
   if (storageMode === 'supabase' && pool && await ensureExpenseTable(pool)) {
     try { await pool.query('DELETE FROM public.expense_ledger WHERE id=$1', [id]); return; }
@@ -331,5 +347,6 @@ export async function deleteExpenseLedgerRecord(id: string) {
     const { error } = await client.from('expense_ledger').delete().eq('id', id);
     if (error) throw new Error(`Unable to remove Expense Ledger entry: ${error.message}`);
   }
+  if (process.env.VERCEL && storageMode === 'supabase') return;
   db().prepare('DELETE FROM expense_ledger WHERE id=?').run(id);
 }
