@@ -68,10 +68,10 @@ export default function Dashboard({ isSuperAdmin }: { isSuperAdmin: boolean }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [syncWarning, setSyncWarning] = useState('');
   const reload = useCallback(async () => {
-    let sharedReadFailed = false;
+    let sharedReadError = '';
     const load = async <T,>(key: typeof storageKeys.currencyRows | typeof storageKeys.productIncreases | typeof storageKeys.sellingEntries, validate: (value: unknown) => value is T, fallback: T): Promise<T> => {
       try { return await loadSharedDashboardValue(key, validate) ?? fallback; }
-      catch { sharedReadFailed = true; return readVersioned(key, validate) ?? fallback; }
+      catch (cause) { sharedReadError ||= cause instanceof Error ? cause.message : 'Shared data request failed.'; return readVersioned(key, validate) ?? fallback; }
     };
     const [rows, increases, sales] = await Promise.all([
       load(storageKeys.currencyRows, isStoredCurrencyRows, [] as CurrencyRow[]),
@@ -79,7 +79,7 @@ export default function Dashboard({ isSuperAdmin }: { isSuperAdmin: boolean }) {
       load(storageKeys.sellingEntries, isStoredSellingEntries, [] as SellingEntry[]),
     ]);
     setData(buildDashboardData(rows, increases, sales));
-    setSyncWarning(sharedReadFailed ? 'Shared company data could not be reached. This dashboard is showing data saved in this browser only; other accounts will not see unsynced changes.' : '');
+    setSyncWarning(sharedReadError ? `${sharedReadError} Showing this browser’s cached data only; unsynced changes are not visible to other accounts.` : '');
   }, []);
   useEffect(() => {
     void reload();

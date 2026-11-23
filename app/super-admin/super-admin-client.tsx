@@ -8,7 +8,7 @@ import { isStoredCurrencyRate, isStoredCurrencyRows, isStoredProductIncreases, i
 import { loadSharedDashboardValue } from '@/lib/shared-dashboard';
 
 type AdminAccount = { id: string; name: string; email: string; role: 'admin' };
-type AuthStatus = { mode: 'supabase' | 'sqlite'; supabaseConfigured: boolean; deployment?: 'vercel' | 'local' };
+type AuthStatus = { mode: 'supabase' | 'sqlite'; supabaseConfigured: boolean; deployment?: 'vercel' | 'local'; sharedDataReady?: boolean; sharedDataError?: string };
 type CreatedCredential = { email: string; password: string };
 type BackupRow = {
   date: string;
@@ -203,11 +203,12 @@ export default function SuperAdminClient({ userName }: { userName: string }) {
     finally { setExporting(null); }
   }
   const usingLocal = status?.mode === 'sqlite';
+  const sharedTableMissing = status?.mode === 'supabase' && status.sharedDataReady === false;
 
   return <main className="admin-page"><header className="admin-topbar"><Link href="/" className="auth-brand"><BrandLogo /></Link><div><span className="admin-user"><ShieldCheck size={16} /> {userName} · Super Admin</span><Link href="/expense-ledger" className="admin-signout"><ReceiptText size={15} /> Expense Ledger</Link><button className="admin-signout" onClick={signOut}><LogOut size={15} /> Sign out</button></div></header>
     <div className="admin-content"><Link href="/" className="admin-back"><ArrowLeft size={15} /> Dashboard</Link>
       <span className="auth-kicker">ELLEXTSTORE · ACCESS CONTROL</span><h1>Super Admin</h1><p className="admin-subtitle">Manage dashboard access and check the active data store.</p>
-      <section className={`store-status ${usingLocal ? 'store-status-local' : 'store-status-online'}`} role="status"><span className="store-status-icon"><Database size={19} /></span><div><strong>{usingLocal ? (status?.supabaseConfigured ? 'Supabase is unavailable' : 'Supabase is not configured') : 'Supabase is connected'}</strong><p>{usingLocal ? status?.deployment === 'vercel' ? 'Vercel SQLite is temporary and does not sync between accounts or function instances. Admin changes will not appear for Super Admin until Supabase reconnects.' : 'The app is using the local SQLite database. Changes are shared only through this local app instance.' : 'Supabase is active and is the shared company data store.'}</p></div><span className="store-status-pill">{usingLocal ? 'LOCAL DATABASE' : 'SUPABASE'}</span></section>
+      <section className={`store-status ${usingLocal || sharedTableMissing ? 'store-status-local' : 'store-status-online'}`} role="status"><span className="store-status-icon"><Database size={19} /></span><div><strong>{usingLocal ? (status?.supabaseConfigured ? 'Supabase is unavailable' : 'Supabase is not configured') : sharedTableMissing ? 'Supabase connected; shared table is missing' : 'Supabase is connected'}</strong><p>{usingLocal ? status?.deployment === 'vercel' ? 'Vercel SQLite is temporary and does not sync between accounts or function instances. Admin changes will not appear for Super Admin until Supabase reconnects.' : 'The app is using the local SQLite database. Changes are shared only through this local app instance.' : sharedTableMissing ? `${status.sharedDataError || 'The public.dashboard_shared_state table is unavailable.'} Apply supabase/migrations/001_dashboard_schema.sql in the Supabase SQL Editor.` : 'Supabase is active and the shared company data table is available.'}</p></div><span className="store-status-pill">{usingLocal ? 'LOCAL DATABASE' : sharedTableMissing ? 'TABLE MISSING' : 'SUPABASE'}</span></section>
       <div className="admin-columns"><section className="admin-panel"><div className="admin-panel-heading"><div className="admin-icon"><Plus size={17} /></div><div><h2>Create Admin account</h2><p>Generate a temporary password to share securely.</p></div></div>
         <form className="auth-form admin-form" onSubmit={createAdmin}><label>Admin name<input required value={name} onChange={(event) => setName(event.target.value)} placeholder="Team member name" /></label><label>Admin email<input required type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="admin@company.com" /></label>
           {error && <p className="auth-error" role="alert">{error}</p>}<button className="auth-submit" disabled={busy}>{busy ? 'Creating account…' : 'Create Admin credentials'} <Plus size={16} /></button>

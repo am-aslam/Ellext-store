@@ -19,7 +19,7 @@ const SESSION_MAX_AGE = 60 * 60 * 24 * 7;
 type UserRow = AppUser & { password_hash: string; supabase_user_id: string | null; created_at: string };
 type SessionRow = { id: string; email: string; name: string; role: UserRole; expires_at: number };
 
-const globalForDb = globalThis as typeof globalThis & { ellextDb?: Database.Database; ellextExpensePool?: Pool; ellextExpenseSchema?: Promise<boolean> };
+const globalForDb = globalThis as typeof globalThis & { ellextDb?: Database.Database; ellextExpensePool?: Pool; ellextExpenseSchema?: Promise<boolean>; ellextSharedDashboardSchema?: Promise<boolean> };
 function db(): Database.Database {
   if (globalForDb.ellextDb) return globalForDb.ellextDb;
   // Vercel's deployed function bundle is read-only. Keep the SQLite fallback
@@ -89,6 +89,9 @@ export async function getStorageMode(): Promise<StorageMode> {
   } catch { return 'sqlite'; }
 }
 async function getCompanyDataStorageMode(): Promise<StorageMode> {
+  // On Vercel, use the configured Supabase data API directly. A failed Auth
+  // health probe does not prove the PostgREST/database endpoint is unavailable.
+  if (process.env.VERCEL && isSupabaseConfigured()) return 'supabase';
   const mode = await getStorageMode();
   // Vercel function filesystems and /tmp are instance-local and ephemeral, so
   // they cannot act as a shared company database for Admin and Super Admin.
@@ -225,30 +228,103 @@ export function clearSession(token: string | undefined) {
 }
 export function getAuthDataStore() { return db(); }
 
-export async function readSharedDashboardValue(storageKey: string): Promise<unknown | null> {
-  if (await getCompanyDataStorageMode() === 'supabase') {
-    const client = getSupabaseAdmin();
-    if (!client) throw new Error('Supabase service key is not configured.');
-    const { data, error } = await client.from('dashboard_shared_state').select('payload').eq('storage_key', storageKey).maybeSingle();
-    if (error) throw new Error(`Unable to load shared dashboard data: ${error.message}`);
-    if (data) return data.payload;
-    // Supabase is the source of truth in production. Ignore per-instance
-    // SQLite snapshots there, since they may belong to a different function.
-    if (process.env.VERCEL) return null;
+async function ensureSharedDashboardTable(pool: Pool): Promise<boolean> {
+  if (!globalForDb.ellextSharedDashboardSchema) {
+    globalForDb.ellextSharedDashboardSchema = (async () => {
+      await pool.query(`CREATE TABLE IF NOT EXISTS public.dashboard_shared_state (
+        storage_key text PRIMARY KEY CHECK (storage_key IN (
+          'ellextstore:v1:currency-rows', 'ellextstore:v1:currency-rate',
+          'ellextstore:v1:product-increases', 'ellextstore:v1:selling-entries',
+          'ellextstore:v1:product-categories'
+        )),
+        payload jsonb NOT NULL,
+        updated_at timestamptz NOT NULL DEFAULT now()
+      )`);
+      await pool.query('ALTER TABLE public.dashboard_shared_state ENABLE ROW LEVEL SECURITY');
+      await pool.query('REVOKE ALL ON public.dashboard_shared_state FROM anon, authenticated');
+      await pool.query('GRANT ALL ON public.dashboard_shared_state TO service_role');
+      await pool.query("NOTIFY pgrst, 'reload schema'");
+      return true;
+    })().catch(() => false);
   }
+  const ready = await globalForDb.ellextSharedDashboardSchema;
+  if (!ready) globalForDb.ellextSharedDashboardSchema = undefined;
+  return ready;
+}
+
+function readLocalSharedDashboardValue(storageKey: string): unknown | null {
   const record = db().prepare('SELECT payload FROM dashboard_shared_state WHERE storage_key=?').get(storageKey) as { payload: string } | undefined;
   if (!record) return null;
   try { return JSON.parse(record.payload) as unknown; }
   catch { db().prepare('DELETE FROM dashboard_shared_state WHERE storage_key=?').run(storageKey); return null; }
 }
 
+function sharedDashboardApiError(action: string, error: { message: string; code?: string }): Error {
+  if (error.code === 'PGRST205' || /could not find the table.*dashboard_shared_state|dashboard_shared_state.*schema cache/i.test(error.message)) {
+    return new Error(`Supabase is missing public.dashboard_shared_state. Automatic table creation needs a working SUPABASE_DB_URL; otherwise apply supabase/migrations/001_dashboard_schema.sql in the Supabase SQL Editor and refresh the API schema cache.`);
+  }
+  return new Error(`Unable to ${action} shared dashboard data: ${error.message}`);
+}
+
+export async function checkSharedDashboardTable(): Promise<{ ready: boolean; error?: string }> {
+  try {
+    if (await getCompanyDataStorageMode() !== 'supabase') return { ready: false, error: 'Supabase is not the active shared data store.' };
+    const pool = expensePool();
+    if (pool && await ensureSharedDashboardTable(pool)) {
+      await pool.query('SELECT storage_key FROM public.dashboard_shared_state LIMIT 0');
+      return { ready: true };
+    }
+    const client = getSupabaseAdmin();
+    if (!client) return { ready: false, error: 'Supabase service role key is not configured.' };
+    const { error } = await client.from('dashboard_shared_state').select('storage_key').limit(0);
+    if (error) return { ready: false, error: sharedDashboardApiError('check', error).message };
+    return { ready: true };
+  } catch (error) {
+    return { ready: false, error: error instanceof Error ? error.message : 'Could not verify shared Supabase storage.' };
+  }
+}
+
+export async function readSharedDashboardValue(storageKey: string): Promise<unknown | null> {
+  if (await getCompanyDataStorageMode() === 'supabase') {
+    const pool = expensePool();
+    if (pool && await ensureSharedDashboardTable(pool)) {
+      try {
+        const { rows } = await pool.query('SELECT payload FROM public.dashboard_shared_state WHERE storage_key=$1 LIMIT 1', [storageKey]);
+        if (rows[0]) return rows[0].payload as unknown;
+        if (process.env.VERCEL) return null;
+        return readLocalSharedDashboardValue(storageKey);
+      } catch { /* Try the Supabase Data API below. */ }
+    }
+    const client = getSupabaseAdmin();
+    if (!client) throw new Error('Supabase service key is not configured.');
+    const { data, error } = await client.from('dashboard_shared_state').select('payload').eq('storage_key', storageKey).maybeSingle();
+    if (error) throw sharedDashboardApiError('load', error);
+    if (data) return data.payload;
+    // Supabase is the source of truth in production. Ignore per-instance
+    // SQLite snapshots there, since they may belong to a different function.
+    if (process.env.VERCEL) return null;
+  }
+  return readLocalSharedDashboardValue(storageKey);
+}
+
 export async function writeSharedDashboardValue(storageKey: string, payload: unknown): Promise<void> {
   const serialized = JSON.stringify(payload);
   if (await getCompanyDataStorageMode() === 'supabase') {
+    const pool = expensePool();
+    if (pool && await ensureSharedDashboardTable(pool)) {
+      try {
+        await pool.query(`INSERT INTO public.dashboard_shared_state(storage_key,payload,updated_at) VALUES($1,$2::jsonb,now())
+          ON CONFLICT(storage_key) DO UPDATE SET payload=EXCLUDED.payload,updated_at=EXCLUDED.updated_at`, [storageKey, serialized]);
+        if (process.env.VERCEL) return;
+        db().prepare(`INSERT INTO dashboard_shared_state(storage_key,payload,updated_at) VALUES(?,?,?)
+          ON CONFLICT(storage_key) DO UPDATE SET payload=excluded.payload,updated_at=excluded.updated_at`).run(storageKey, serialized, new Date().toISOString());
+        return;
+      } catch { /* Try the Supabase Data API below. */ }
+    }
     const client = getSupabaseAdmin();
     if (!client) throw new Error('Supabase service key is not configured.');
     const { error } = await client.from('dashboard_shared_state').upsert({ storage_key: storageKey, payload, updated_at: new Date().toISOString() }, { onConflict: 'storage_key' });
-    if (error) throw new Error(`Unable to save shared dashboard data: ${error.message}`);
+    if (error) throw sharedDashboardApiError('save', error);
     if (process.env.VERCEL) return;
   }
   db().prepare(`INSERT INTO dashboard_shared_state(storage_key,payload,updated_at) VALUES(?,?,?)

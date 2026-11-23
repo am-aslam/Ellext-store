@@ -112,3 +112,5 @@ REVOKE ALL ON public.currency_rows, public.product_increases, public.selling_ent
 GRANT ALL ON public.currency_rows, public.product_increases, public.selling_entries,
   public.product_requests, public.member_invitations, public.product_categories,
   public.company_expenses, public.expense_ledger, public.dashboard_snapshots, public.dashboard_shared_state TO service_role;
+
+NOTIFY pgrst, 'reload schema';
