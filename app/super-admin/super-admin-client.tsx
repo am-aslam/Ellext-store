@@ -8,7 +8,14 @@ import { isStoredCurrencyRate, isStoredCurrencyRows, isStoredProductIncreases, i
 import { loadSharedDashboardValue } from '@/lib/shared-dashboard';
 
 type AdminAccount = { id: string; name: string; email: string; role: 'admin' };
-type AuthStatus = { mode: 'supabase' | 'sqlite'; supabaseConfigured: boolean; deployment?: 'vercel' | 'local'; sharedDataReady?: boolean; sharedDataError?: string };
+type AuthStatus = {
+  mode: 'supabase' | 'sqlite'; supabaseConfigured: boolean; deployment?: 'vercel' | 'local';
+  sharedDataReady?: boolean; sharedDataError?: string;
+  diagnostics?: {
+    auth: string; restApi: string; database: string; schema: string;
+    sharedTable: string; permissions: string;
+  };
+};
 type CreatedCredential = { email: string; password: string };
 type BackupRow = {
   date: string;
@@ -79,6 +86,7 @@ export default function SuperAdminClient({ userName }: { userName: string }) {
   const [name, setName] = useState(''); const [email, setEmail] = useState(''); const [error, setError] = useState(''); const [busy, setBusy] = useState(false);
   const [credential, setCredential] = useState<CreatedCredential | null>(null); const [copied, setCopied] = useState(false);
   const [backup, setBackup] = useState<SalesBackup | null>(null);
+  const [backupLoading, setBackupLoading] = useState(true);
   const [exporting, setExporting] = useState<ExportFormat | null>(null);
   const [backupError, setBackupError] = useState('');
   const [backupNotice, setBackupNotice] = useState('');
@@ -91,15 +99,21 @@ export default function SuperAdminClient({ userName }: { userName: string }) {
     let active = true;
     const updateBackup = async () => {
       try {
+        setBackupLoading(true);
         const [products, rate, increases, sales] = await Promise.all([
           loadSharedDashboardValue(storageKeys.currencyRows, isStoredCurrencyRows),
           loadSharedDashboardValue(storageKeys.currencyRate, isStoredCurrencyRate),
           loadSharedDashboardValue(storageKeys.productIncreases, isStoredProductIncreases),
           loadSharedDashboardValue(storageKeys.sellingEntries, isStoredSellingEntries),
         ]);
-        if (active) setBackup(makeSalesBackup(products ?? [], rate, increases ?? [], sales ?? []));
+        if (active) {
+          setBackup(makeSalesBackup(products ?? [], rate, increases ?? [], sales ?? []));
+          setBackupError('');
+        }
       } catch (cause) {
         if (active) setBackupError(cause instanceof Error ? `Shared sales data could not be loaded: ${cause.message}` : 'Shared sales data could not be loaded.');
+      } finally {
+        if (active) setBackupLoading(false);
       }
     };
     void updateBackup();
@@ -203,12 +217,15 @@ export default function SuperAdminClient({ userName }: { userName: string }) {
     finally { setExporting(null); }
   }
   const usingLocal = status?.mode === 'sqlite';
-  const sharedTableMissing = status?.mode === 'supabase' && status.sharedDataReady === false;
+  const sharedTableMissing = status?.diagnostics
+    ? status.diagnostics.sharedTable === 'missing'
+    : status?.mode === 'supabase' && status.sharedDataReady === false;
+  const sharedDataUnavailable = status?.mode === 'supabase' && status.sharedDataReady === false && !sharedTableMissing;
 
   return <main className="admin-page"><header className="admin-topbar"><Link href="/" className="auth-brand"><BrandLogo /></Link><div><span className="admin-user"><ShieldCheck size={16} /> {userName} · Super Admin</span><Link href="/expense-ledger" className="admin-signout"><ReceiptText size={15} /> Expense Ledger</Link><button className="admin-signout" onClick={signOut}><LogOut size={15} /> Sign out</button></div></header>
     <div className="admin-content"><Link href="/" className="admin-back"><ArrowLeft size={15} /> Dashboard</Link>
       <span className="auth-kicker">ELLEXTSTORE · ACCESS CONTROL</span><h1>Super Admin</h1><p className="admin-subtitle">Manage dashboard access and check the active data store.</p>
-      <section className={`store-status ${usingLocal || sharedTableMissing ? 'store-status-local' : 'store-status-online'}`} role="status"><span className="store-status-icon"><Database size={19} /></span><div><strong>{usingLocal ? (status?.supabaseConfigured ? 'Supabase is unavailable' : 'Supabase is not configured') : sharedTableMissing ? 'Supabase connected; shared table is missing' : 'Supabase is connected'}</strong><p>{usingLocal ? status?.deployment === 'vercel' ? 'Vercel SQLite is temporary and does not sync between accounts or function instances. Admin changes will not appear for Super Admin until Supabase reconnects.' : 'The app is using the local SQLite database. Changes are shared only through this local app instance.' : sharedTableMissing ? `${status.sharedDataError || 'The public.dashboard_shared_state table is unavailable.'} Apply supabase/migrations/001_dashboard_schema.sql in the Supabase SQL Editor.` : 'Supabase is active and the shared company data table is available.'}</p></div><span className="store-status-pill">{usingLocal ? 'LOCAL DATABASE' : sharedTableMissing ? 'TABLE MISSING' : 'SUPABASE'}</span></section>
+      <section className={`store-status ${usingLocal || sharedTableMissing || sharedDataUnavailable ? 'store-status-local' : 'store-status-online'}`} role="status"><span className="store-status-icon"><Database size={19} /></span><div><strong>{usingLocal ? (status?.supabaseConfigured ? 'Supabase is unavailable' : 'Supabase is not configured') : sharedTableMissing ? 'Supabase connected; shared table is missing' : sharedDataUnavailable ? 'Supabase shared data is unavailable' : 'Supabase is connected'}</strong><p>{usingLocal ? status?.deployment === 'vercel' ? 'Vercel SQLite is temporary and does not sync between accounts or function instances. Admin changes will not appear for Super Admin until Supabase reconnects.' : 'The app is using the local SQLite database. Changes are shared only through this local app instance.' : sharedTableMissing ? `${status?.sharedDataError || 'Supabase does not expose public.dashboard_shared_state.'}${status?.sharedDataError?.includes('001_dashboard_schema.sql') ? '' : ' Apply supabase/migrations/001_dashboard_schema.sql in the Supabase SQL Editor, then refresh the API schema cache.'}` : sharedDataUnavailable ? status?.sharedDataError || 'The Supabase REST API, database, or table permissions could not be verified.' : 'Supabase is active and the shared company data table is available.'}{status?.diagnostics && <><br />Auth: {status.diagnostics.auth} · REST API: {status.diagnostics.restApi} · PostgreSQL: {status.diagnostics.database} · Schema: {status.diagnostics.schema} · Permissions: {status.diagnostics.permissions}</>}</p></div><span className="store-status-pill">{usingLocal ? 'LOCAL DATABASE' : sharedTableMissing ? 'TABLE MISSING' : sharedDataUnavailable ? 'UNAVAILABLE' : 'SUPABASE'}</span></section>
       <div className="admin-columns"><section className="admin-panel"><div className="admin-panel-heading"><div className="admin-icon"><Plus size={17} /></div><div><h2>Create Admin account</h2><p>Generate a temporary password to share securely.</p></div></div>
         <form className="auth-form admin-form" onSubmit={createAdmin}><label>Admin name<input required value={name} onChange={(event) => setName(event.target.value)} placeholder="Team member name" /></label><label>Admin email<input required type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="admin@company.com" /></label>
           {error && <p className="auth-error" role="alert">{error}</p>}<button className="auth-submit" disabled={busy}>{busy ? 'Creating account…' : 'Create Admin credentials'} <Plus size={16} /></button>
@@ -218,10 +235,12 @@ export default function SuperAdminClient({ userName }: { userName: string }) {
       <section className="admin-panel admin-list-panel"><div className="admin-panel-heading"><div className="admin-icon"><ShieldCheck size={17} /></div><div><h2>Admin accounts <span>{admins.length}</span></h2><p>Admin accounts have access to all dashboard features.</p></div></div>
         {admins.length ? <ul className="admin-list">{admins.map((admin) => <li key={admin.id}><span className="admin-avatar">{admin.name.slice(0, 1).toUpperCase()}</span><span><strong>{admin.name}</strong><small>{admin.email}</small></span><em>Admin</em></li>)}</ul> : <div className="admin-list-empty"><ShieldCheck size={20} /><strong>No Admin accounts yet</strong><span>Create the first Admin account to provide dashboard access.</span></div>}
       </section></div>
-      <section className="admin-panel backup-panel" aria-labelledby="backup-title"><div className="admin-panel-heading"><div className="admin-icon backup-icon"><Database size={17} /></div><div><h2 id="backup-title">Sales data backup</h2><p>Export saved Selling Details records from this browser. Files download to your device.</p></div></div>
+      <section className="admin-panel backup-panel" aria-labelledby="backup-title"><div className="admin-panel-heading"><div className="admin-icon backup-icon"><Database size={17} /></div><div><h2 id="backup-title">Sales data backup</h2><p>Export saved Selling Details records from shared company storage. Files download to your device.</p></div></div>
         <div className="backup-summary"><span><small>Saved rows</small><b>{backup?.rows.length ?? '—'}</b></span><span><small>Items sold</small><b>{backup?.totalSold.toLocaleString('en-IN') ?? '—'}</b></span><span><small>Total collected</small><b>{backup?.totalCollected === null || backup?.totalCollected === undefined ? '—' : new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 2 }).format(backup.totalCollected)}</b></span></div>
         <div className="backup-actions"><button className="backup-export-button" onClick={() => void exportExcel()} disabled={!backup?.rows.length || exporting !== null}><FileSpreadsheet size={17} />{exporting === 'excel' ? 'Preparing Excel…' : 'Export Excel (.xlsx)'}</button><button className="backup-export-button backup-pdf-button" onClick={() => void exportPdf()} disabled={!backup?.rows.length || exporting !== null}><FileText size={17} />{exporting === 'pdf' ? 'Preparing PDF…' : 'Export PDF'}</button></div>
-        {!backup?.rows.length && <p className="backup-empty">No saved sales rows yet. Enter and save sold item counts in Selling Details to enable exports.</p>}
+        {backupLoading && <p className="backup-empty" role="status">Loading shared sales data…</p>}
+        {!backupLoading && !backupError && !backup?.rows.length && <p className="backup-empty">No saved sales rows yet. Enter and save sold item counts in Selling Details to enable exports.</p>}
+        {!backupLoading && backupError && <p className="backup-empty">Backup statistics are unavailable until shared storage reconnects.</p>}
         {backupError && <p className="auth-error backup-message" role="alert">{backupError}</p>}{backupNotice && <p className="backup-success" role="status"><Check size={14} />{backupNotice}</p>}
       </section>
     </div>

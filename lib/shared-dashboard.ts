@@ -11,24 +11,6 @@ export type SharedDashboardKey = typeof sharedDashboardKeys[number];
 
 const saveQueue = new Map<SharedDashboardKey, Promise<void>>();
 
-function mergeSharedValue<T>(key: SharedDashboardKey, cached: T | null, shared: T): T {
-  if (cached === null) return shared;
-  if (key === storageKeys.currencyRate) {
-    const localDate = Date.parse((cached as { updatedAt?: string })?.updatedAt || '');
-    const sharedDate = Date.parse((shared as { updatedAt?: string })?.updatedAt || '');
-    return Number.isFinite(localDate) && localDate > sharedDate ? cached : shared;
-  }
-  if (Array.isArray(cached) && Array.isArray(shared)) {
-    if (key === storageKeys.productCategories) return Array.from(new Set([...cached, ...shared])) as T;
-    const idField = key === storageKeys.currencyRows ? 'id' : 'sourceId';
-    const merged = new Map<string, unknown>();
-    for (const item of cached) if (item && typeof item === 'object' && typeof item[idField] === 'string') merged.set(item[idField], item);
-    for (const item of shared) if (item && typeof item === 'object' && typeof item[idField] === 'string') merged.set(item[idField], item);
-    return Array.from(merged.values()) as T;
-  }
-  return shared;
-}
-
 export async function loadSharedDashboardValue<T>(
   key: SharedDashboardKey,
   validate: (value: unknown) => value is T,
@@ -42,10 +24,15 @@ export async function loadSharedDashboardValue<T>(
     return cached;
   }
   if (!validate(result.value)) throw new Error('Shared company data failed validation.');
-  const merged = mergeSharedValue(key, cached, result.value);
-  writeVersioned(key, merged);
-  if (JSON.stringify(merged) !== JSON.stringify(result.value)) await saveSharedDashboardValue(key, merged);
-  return merged;
+  // An existing remote snapshot is authoritative. A stale tab-local snapshot
+  // must never resurrect deleted rows or replace a newer server value. Keep a
+  // recovery copy of non-empty divergent browser data before refreshing cache.
+  if (cached !== null && JSON.stringify(cached) !== JSON.stringify(result.value)) {
+    const hasLocalData = Array.isArray(cached) ? cached.length > 0 : cached !== null;
+    if (hasLocalData) writeVersioned(`ellextstore:recovery:v1:${key}`, cached);
+  }
+  writeVersioned(key, result.value);
+  return result.value;
 }
 
 export function saveSharedDashboardValue(key: SharedDashboardKey, value: unknown): Promise<void> {

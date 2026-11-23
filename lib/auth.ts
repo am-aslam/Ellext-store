@@ -89,16 +89,22 @@ export async function getStorageMode(): Promise<StorageMode> {
   } catch { return 'sqlite'; }
 }
 async function getCompanyDataStorageMode(): Promise<StorageMode> {
-  // On Vercel, use the configured Supabase data API directly. A failed Auth
-  // health probe does not prove the PostgREST/database endpoint is unavailable.
-  if (process.env.VERCEL && isSupabaseConfigured()) return 'supabase';
-  const mode = await getStorageMode();
-  // Vercel function filesystems and /tmp are instance-local and ephemeral, so
-  // they cannot act as a shared company database for Admin and Super Admin.
-  if (process.env.VERCEL && mode !== 'supabase') {
-    throw new Error('Shared Supabase storage is unavailable. This Vercel deployment cannot use SQLite as shared storage; check the Supabase URL and service role key.');
+  // Shared company data depends on the Data API, not Auth health. An Auth
+  // outage must not silently divert locally running users from healthy shared
+  // storage into a separate SQLite database.
+  if (isSupabaseConfigured()) {
+    try {
+      const response = await fetch(`${supabaseUrl().replace(/\/$/, '')}/rest/v1/`, {
+        headers: { apikey: adminKey(), Authorization: `Bearer ${adminKey()}` },
+        cache: 'no-store', signal: AbortSignal.timeout(1800),
+      });
+      if (response.ok) return 'supabase';
+    } catch { /* The local SQLite fallback is allowed only outside Vercel. */ }
   }
-  return mode;
+  if (process.env.VERCEL) {
+    throw new Error('Shared Supabase storage is unavailable. This Vercel deployment cannot use SQLite as shared storage; check the Supabase URL, service role key, and Data API connectivity.');
+  }
+  return 'sqlite';
 }
 async function listSupabaseUsers(): Promise<AppUser[]> {
   const client = getSupabaseAdmin();
@@ -266,22 +272,100 @@ function sharedDashboardApiError(action: string, error: { message: string; code?
   return new Error(`Unable to ${action} shared dashboard data: ${error.message}`);
 }
 
-export async function checkSharedDashboardTable(): Promise<{ ready: boolean; error?: string }> {
-  try {
-    if (await getCompanyDataStorageMode() !== 'supabase') return { ready: false, error: 'Supabase is not the active shared data store.' };
-    const pool = expensePool();
-    if (pool && await ensureSharedDashboardTable(pool)) {
-      await pool.query('SELECT storage_key FROM public.dashboard_shared_state LIMIT 0');
-      return { ready: true };
-    }
-    const client = getSupabaseAdmin();
-    if (!client) return { ready: false, error: 'Supabase service role key is not configured.' };
-    const { error } = await client.from('dashboard_shared_state').select('storage_key').limit(0);
-    if (error) return { ready: false, error: sharedDashboardApiError('check', error).message };
-    return { ready: true };
-  } catch (error) {
-    return { ready: false, error: error instanceof Error ? error.message : 'Could not verify shared Supabase storage.' };
+export type SupabaseDiagnostics = {
+  auth: 'connected' | 'failed' | 'not_configured';
+  restApi: 'connected' | 'failed' | 'not_configured';
+  database: 'connected' | 'failed' | 'not_configured';
+  schema: 'ready' | 'missing' | 'unavailable' | 'not_configured';
+  sharedTable: 'available' | 'missing' | 'unavailable' | 'not_configured';
+  permissions: 'valid' | 'failed' | 'unknown' | 'not_configured';
+  error?: string;
+};
+
+function safeConnectionError(error: unknown): string {
+  let current: unknown = error;
+  for (let depth = 0; depth < 4 && current && typeof current === 'object'; depth += 1) {
+    const candidate = current as { code?: unknown; message?: unknown; cause?: unknown };
+    if (typeof candidate.code === 'string' && /^[A-Z0-9_]+$/.test(candidate.code)) return candidate.code;
+    current = candidate.cause;
   }
+  return 'Connection failed';
+}
+
+export async function getSupabaseDiagnostics(): Promise<SupabaseDiagnostics> {
+  if (!isSupabaseConfigured()) return {
+    auth: 'not_configured', restApi: 'not_configured', database: 'not_configured',
+    schema: 'not_configured', sharedTable: 'not_configured', permissions: 'not_configured',
+    error: 'Supabase URL, public key, or server service role key is not configured.',
+  };
+
+  const root = supabaseUrl().replace(/\/$/, '');
+  const result: SupabaseDiagnostics = {
+    auth: 'failed', restApi: 'failed', database: 'not_configured',
+    schema: 'unavailable', sharedTable: 'unavailable', permissions: 'unknown',
+  };
+  const authRequest = fetch(`${root}/auth/v1/health`, {
+    headers: { apikey: anonKey() }, cache: 'no-store', signal: AbortSignal.timeout(2500),
+  }).then(response => { result.auth = response.ok ? 'connected' : 'failed'; })
+    .catch(error => { result.auth = 'failed'; result.error ||= `Auth: ${safeConnectionError(error)}`; });
+  const restRequest = fetch(`${root}/rest/v1/`, {
+    headers: { apikey: adminKey(), Authorization: `Bearer ${adminKey()}` },
+    cache: 'no-store', signal: AbortSignal.timeout(2500),
+  }).then(response => { result.restApi = response.ok ? 'connected' : 'failed'; })
+    .catch(error => { result.restApi = 'failed'; result.error ||= `REST API: ${safeConnectionError(error)}`; });
+  const databaseRequest = (async () => {
+    try {
+      const pool = expensePool();
+      if (!pool) return;
+      const connection = await pool.query('SELECT 1 AS connected');
+      if (connection.rows[0]?.connected === 1) result.database = 'connected';
+      const inspection = await pool.query(`SELECT to_regclass('public.dashboard_shared_state') AS table_name`);
+      if (!inspection.rows[0]?.table_name) {
+        result.schema = 'missing'; result.sharedTable = 'missing'; result.permissions = 'unknown';
+      } else {
+        result.schema = 'ready';
+        const access = await pool.query(`SELECT
+          has_table_privilege('service_role', 'public.dashboard_shared_state', 'SELECT')
+          AND has_table_privilege('service_role', 'public.dashboard_shared_state', 'INSERT')
+          AND has_table_privilege('service_role', 'public.dashboard_shared_state', 'UPDATE')
+          AND has_table_privilege('service_role', 'public.dashboard_shared_state', 'DELETE') AS allowed`);
+        result.permissions = access.rows[0]?.allowed ? 'valid' : 'failed';
+        if (result.permissions === 'valid') result.sharedTable = 'available';
+      }
+    } catch (error) {
+      result.database = 'failed'; result.error ||= `PostgreSQL: ${safeConnectionError(error)}`;
+    }
+  })();
+  await Promise.all([authRequest, restRequest, databaseRequest]);
+
+  // Check PostgREST independently: the service-role grant is what the server
+  // routes use, while anonymous/authenticated browser roles remain revoked.
+  const client = getSupabaseAdmin();
+  if (!client) result.permissions = 'unknown';
+  else {
+    const { error } = await client.from('dashboard_shared_state').select('storage_key').limit(0);
+    if (!error) {
+      if (result.schema === 'unavailable') result.schema = 'ready';
+      result.sharedTable = 'available';
+      if (result.permissions === 'unknown') result.permissions = 'valid';
+    } else if (error.code === 'PGRST205' || /could not find the table.*dashboard_shared_state|dashboard_shared_state.*schema cache/i.test(error.message)) {
+      result.schema = 'missing'; result.sharedTable = 'missing';
+      result.error ||= 'Supabase does not expose public.dashboard_shared_state to PostgREST. Apply the dashboard schema migration and reload the API schema cache.';
+    } else if (error.code === '42501' || /permission denied|not allowed/i.test(error.message)) {
+      result.schema = 'ready'; result.sharedTable = 'unavailable'; result.permissions = 'failed';
+      result.error ||= 'The service role cannot read public.dashboard_shared_state. Check the migration grants.';
+    } else if (result.error === undefined) {
+      result.error = `PostgREST table check: ${error.code || 'request failed'}`;
+    }
+  }
+  return result;
+}
+
+export async function checkSharedDashboardTable(): Promise<{ ready: boolean; error?: string }> {
+  const diagnostics = await getSupabaseDiagnostics();
+  if (diagnostics.sharedTable === 'available' && diagnostics.permissions === 'valid') return { ready: true };
+  if (diagnostics.error) return { ready: false, error: diagnostics.error };
+  return { ready: false, error: 'Supabase shared dashboard table is unavailable or its permissions could not be verified.' };
 }
 
 export async function readSharedDashboardValue(storageKey: string): Promise<unknown | null> {
@@ -358,6 +442,7 @@ async function ensureExpenseTable(pool: Pool): Promise<boolean> {
       await pool.query('ALTER TABLE public.expense_ledger ENABLE ROW LEVEL SECURITY');
       await pool.query('REVOKE ALL ON public.expense_ledger FROM anon, authenticated');
       await pool.query('GRANT ALL ON public.expense_ledger TO service_role');
+      await pool.query("NOTIFY pgrst, 'reload schema'");
       return true;
     })().catch(() => false);
   }
