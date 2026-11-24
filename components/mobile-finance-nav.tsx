@@ -3,15 +3,16 @@
 import Link from 'next/link';
 import { BrandLogo } from '@/components/brand-logo';
 import { useEffect, useState } from 'react';
-import { ArrowLeftRight, ChartNoAxesColumnIncreasing, LayoutDashboard, Menu, Percent, ReceiptText, TrendingUp, X } from 'lucide-react';
+import { ArrowLeftRight, ChartNoAxesColumnIncreasing, LayoutDashboard, Menu, Percent, ReceiptText, Store, TrendingUp, X } from 'lucide-react';
 
-type FinanceRoute = '/' | '/currency-exchange' | '/product-percentage' | '/selling-details' | '/expense-ledger' | '/company-growth';
+type FinanceRoute = '/' | '/currency-exchange' | '/product-percentage' | '/selling-details' | '/ellext-retailers' | '/expense-ledger' | '/company-growth';
 
 const routes: { href: FinanceRoute; label: string; icon: typeof LayoutDashboard }[] = [
   { href: '/', label: 'Dashboard', icon: LayoutDashboard },
   { href: '/currency-exchange', label: 'Currency Exchange', icon: ArrowLeftRight },
   { href: '/product-percentage', label: 'Product Percentage', icon: Percent },
   { href: '/selling-details', label: 'Selling Details', icon: ChartNoAxesColumnIncreasing },
+  { href: '/ellext-retailers', label: 'Retailers', icon: Store },
   { href: '/expense-ledger', label: 'Expense Ledger', icon: ReceiptText },
   { href: '/company-growth', label: 'Company Growth', icon: TrendingUp },
 ];

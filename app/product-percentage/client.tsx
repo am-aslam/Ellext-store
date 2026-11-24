@@ -4,10 +4,11 @@ import Image from 'next/image';
 import Link from 'next/link';
 import { BrandLogo } from '@/components/brand-logo';
 import { useEffect, useMemo, useState } from 'react';
-import { ArrowLeftRight, ChartNoAxesColumnIncreasing, Check, LayoutDashboard, LockKeyhole, LogOut, Pencil, Percent, ReceiptText, Share2, UnlockKeyhole } from 'lucide-react';
+import { ArrowLeftRight, ChartNoAxesColumnIncreasing, Check, LayoutDashboard, LockKeyhole, LogOut, Pencil, Percent, ReceiptText, Share2, Store, UnlockKeyhole } from 'lucide-react';
 import { isStoredCurrencyRate, isStoredCurrencyRows, isStoredProductIncreases, isStoredSellingEntries, storageKeys, type CurrencyRateSnapshot, type CurrencyRow, type ProductIncrease, type SellingEntry } from '../../lib/storage';
 import { MobileFinanceNav } from '../../components/mobile-finance-nav';
 import { loadSharedDashboardValue, saveSharedDashboardValue } from '../../lib/shared-dashboard';
+import { shareProductWithImage } from '@/lib/product-share';
 
 const formatMoney = (amount: number) => new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 2 }).format(amount);
 const formatDate = (date: string) => new Intl.DateTimeFormat('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }).format(new Date(date));
@@ -50,7 +51,7 @@ export default function ProductPercentagePage() {
 
   const rows = useMemo(() => sourceRows.filter(row => row.active), [sourceRows]);
   const increaseMap = useMemo(() => new Map(increases.map(item => [item.sourceId, item])), [increases]);
-  const soldMap = useMemo(() => new Map(sellingEntries.map(item => [item.sourceId, item.soldCount])), [sellingEntries]);
+  const soldMap = useMemo(() => new Map(sellingEntries.map(item => [item.sourceId, (item.soldCount ?? 0) + (item.retailerSoldCount ?? 0)])), [sellingEntries]);
   const beginEdit = (row: CurrencyRow) => {
     const saved = increaseMap.get(row.id);
     setEditingIds(current => current.includes(row.id) ? current : [...current, row.id]);
@@ -87,13 +88,13 @@ export default function ProductPercentagePage() {
     const value = Number(draft);
     return Number.isFinite(value) ? value : undefined;
   };
-  const shareProductOnWhatsApp = (row: CurrencyRow, sellingPrice: number) => {
+  const shareProductOnWhatsApp = async (row: CurrencyRow, sellingPrice: number) => {
     if (!Number.isFinite(sellingPrice) || sellingPrice <= 0) { setNotice('Save a valid selling price before sharing this product.'); return; }
     const available = row.active && Math.max(0, row.productCount - (soldMap.get(row.id) ?? 0)) > 0;
     const description = row.description.trim().replace(/\s+/g, ' ').slice(0, 180);
     const message = [
       `📢 *${available ? 'PRODUCT AVAILABLE!' : 'PRODUCT OUT OF STOCK'}*`, '',
-      `✨ *Product Name:* ${description}`, '',
+      `✨ *Product Name:* ${row.category || 'Product'}`, '',
       `📝 *Description:* ${description}`, '',
       `💰 *Price:* ${formatMoney(sellingPrice)}`, '',
       `📦 *Availability:* ${available ? 'In Stock' : 'Out of Stock'}`,
@@ -102,15 +103,13 @@ export default function ProductPercentagePage() {
       '📸 Product images attached.', '',
       '*EllextStore*',
     ].join('\n');
-    const whatsappUrl = new URL('https://wa.me/');
-    whatsappUrl.searchParams.set('text', message);
-    window.open(whatsappUrl.toString(), '_blank', 'noopener,noreferrer');
-    const imageDownload = document.createElement('a');
-    imageDownload.href = row.image;
-    imageDownload.download = `${row.description.trim().replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').slice(0, 60) || 'ellext-product'}.webp`;
-    imageDownload.rel = 'noreferrer';
-    imageDownload.click();
-    setNotice('WhatsApp opened with the product details. Attach the downloaded product image before sending.');
+    try {
+      await shareProductWithImage({ image: row.image, filename: row.category || row.description, text: message });
+      setNotice('Product image and details were shared. Choose WhatsApp, then a chat or Status.');
+    } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') return;
+      setNotice(error instanceof Error ? error.message : 'Could not share the product image and details.');
+    }
   };
 
   return <main className="page-shell">
@@ -122,6 +121,7 @@ export default function ProductPercentagePage() {
           <Link className="nav-link" href="/currency-exchange"><ArrowLeftRight size={19} strokeWidth={1.8} /><span>Currency Exchange</span></Link>
           <Link className="nav-link selected" href="/product-percentage"><Percent size={19} strokeWidth={1.8} /><span>Product Percentage</span></Link>
           <Link className="nav-link" href="/selling-details"><ChartNoAxesColumnIncreasing size={19} strokeWidth={1.8} /><span>Selling Details</span></Link>
+          <Link className="nav-link" href="/ellext-retailers"><Store size={19} strokeWidth={1.8} /><span>Retailers</span></Link>
           <Link className="nav-link" href="/expense-ledger"><ReceiptText size={19} strokeWidth={1.8} /><span>Expense Ledger</span></Link>
         </nav>
         <div className="currency-sidebar-note"><span className="currency-rate-icon"><Percent size={18} /></span><span>Markup entries<br /><b>{increases.length} saved</b></span></div>

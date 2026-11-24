@@ -69,13 +69,19 @@ function db(): Database.Database {
 function supabaseUrl() { return process.env.NEXT_PUBLIC_SUPABASE_URL?.trim() || ''; }
 function anonKey() { return process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY?.trim() || ''; }
 function adminKey() { return process.env.SUPABASE_SERVICE_ROLE_KEY?.trim() || ''; }
+const supabaseFetch: typeof fetch = (input, init = {}) => fetch(input, {
+  ...init,
+  // A cold Supabase Data API request measured 7.46s; warm reads are ~2.4–2.7s.
+  // Keep a bounded margin for cold starts without allowing an unbounded wait.
+  signal: init.signal ?? AbortSignal.timeout(8000),
+});
 function getSupabase(): SupabaseClient | null {
   if (!supabaseUrl() || !anonKey()) return null;
-  return createClient(supabaseUrl(), anonKey(), { auth: { autoRefreshToken: false, persistSession: false } });
+  return createClient(supabaseUrl(), anonKey(), { auth: { autoRefreshToken: false, persistSession: false }, global: { fetch: supabaseFetch } });
 }
 function getSupabaseAdmin(): SupabaseClient | null {
   if (!supabaseUrl() || !adminKey()) return null;
-  return createClient(supabaseUrl(), adminKey(), { auth: { autoRefreshToken: false, persistSession: false } });
+  return createClient(supabaseUrl(), adminKey(), { auth: { autoRefreshToken: false, persistSession: false }, global: { fetch: supabaseFetch } });
 }
 
 export function isSupabaseConfigured() { return Boolean(supabaseUrl() && anonKey() && adminKey()); }
@@ -89,21 +95,10 @@ export async function getStorageMode(): Promise<StorageMode> {
   } catch { return 'sqlite'; }
 }
 async function getCompanyDataStorageMode(): Promise<StorageMode> {
-  // Shared company data depends on the Data API, not Auth health. An Auth
-  // outage must not silently divert locally running users from healthy shared
-  // storage into a separate SQLite database.
-  if (isSupabaseConfigured()) {
-    try {
-      const response = await fetch(`${supabaseUrl().replace(/\/$/, '')}/rest/v1/`, {
-        headers: { apikey: adminKey(), Authorization: `Bearer ${adminKey()}` },
-        cache: 'no-store', signal: AbortSignal.timeout(1800),
-      });
-      if (response.ok) return 'supabase';
-    } catch { /* The local SQLite fallback is allowed only outside Vercel. */ }
-  }
-  if (process.env.VERCEL) {
-    throw new Error('Shared Supabase storage is unavailable. This Vercel deployment cannot use SQLite as shared storage; check the Supabase URL, service role key, and Data API connectivity.');
-  }
+  // Supabase is authoritative whenever configured. Avoid an extra REST health
+  // request on every read; attempt the actual database operation directly.
+  if (isSupabaseConfigured()) return 'supabase';
+  if (process.env.VERCEL) throw new Error('Supabase shared storage is not configured for this deployment.');
   return 'sqlite';
 }
 async function listSupabaseUsers(): Promise<AppUser[]> {
@@ -371,26 +366,36 @@ export async function checkSharedDashboardTable(): Promise<{ ready: boolean; err
   return { ready: false, error: 'Supabase shared dashboard table is unavailable or its permissions could not be verified.' };
 }
 
-export async function readSharedDashboardValue(storageKey: string): Promise<SharedDashboardSnapshot> {
+export async function readSharedDashboardValues(requestKeys: string[], requestId?: string): Promise<Record<string, SharedDashboardSnapshot>> {
   const storageMode = await getCompanyDataStorageMode();
   if (storageMode === 'supabase') {
-    const pool = expensePool();
-    if (pool && await ensureSharedDashboardTable(pool)) {
-      try {
-        const { rows } = await pool.query('SELECT payload,updated_at::text AS revision FROM public.dashboard_shared_state WHERE storage_key=$1 LIMIT 1', [storageKey]);
-        if (rows[0]) return { value: rows[0].payload as unknown, revision: rows[0].revision as string, storageMode };
-        return { value: null, revision: null, storageMode };
-      } catch { /* Try the Supabase Data API below. */ }
-    }
     const client = getSupabaseAdmin();
     if (!client) throw new Error('Supabase service key is not configured.');
-    const { data, error } = await client.from('dashboard_shared_state').select('payload,updated_at').eq('storage_key', storageKey).maybeSingle();
-    if (error) throw sharedDashboardApiError('load', error);
-    if (data) return { value: data.payload, revision: data.updated_at, storageMode };
-    return { value: null, revision: null, storageMode };
+    const startedAt = performance.now();
+    try {
+      const { data, error } = await client.from('dashboard_shared_state').select('storage_key,payload,updated_at').in('storage_key', requestKeys).limit(requestKeys.length);
+      if (error) throw sharedDashboardApiError('load', error);
+      const records = new Map((data ?? []).map(row => [row.storage_key, row]));
+      const snapshots = Object.fromEntries(requestKeys.map(key => {
+        const row = records.get(key);
+        return [key, { value: row?.payload ?? null, revision: row?.updated_at ?? null, storageMode }];
+      }));
+      console.info(JSON.stringify({ event: 'shared_dashboard_query', requestId: requestId ?? null, provider: 'supabase-rest', durationMs: Math.round(performance.now() - startedAt), status: 'ok', keyCount: requestKeys.length }));
+      return snapshots;
+    } catch (error) {
+      const category = error instanceof Error && error.name === 'TimeoutError' ? 'timeout' : error instanceof Error && 'code' in error && (error as Error & {code?:string}).code === 'ENOTFOUND' ? 'dns' : 'request_failed';
+      console.error(JSON.stringify({ event: 'shared_dashboard_query', requestId: requestId ?? null, provider: 'supabase-rest', durationMs: Math.round(performance.now() - startedAt), status: 'error', category, keyCount: requestKeys.length }));
+      throw error;
+    }
   }
-  const local = readLocalSharedDashboardValue(storageKey);
-  return { value: local?.value ?? null, revision: local?.revision ?? null, storageMode };
+  return Object.fromEntries(requestKeys.map(key => {
+    const local = readLocalSharedDashboardValue(key);
+    return [key, { value: local?.value ?? null, revision: local?.revision ?? null, storageMode }];
+  }));
+}
+
+export async function readSharedDashboardValue(storageKey: string, requestId?: string): Promise<SharedDashboardSnapshot> {
+  return (await readSharedDashboardValues([storageKey], requestId))[storageKey];
 }
 
 export async function writeSharedDashboardValue(storageKey: string, payload: unknown, expectedRevision: string | null): Promise<{ storageMode: StorageMode; revision: string }> {
@@ -398,29 +403,6 @@ export async function writeSharedDashboardValue(storageKey: string, payload: unk
   const storageMode = await getCompanyDataStorageMode();
   const revision = new Date().toISOString();
   if (storageMode === 'supabase') {
-    const pool = expensePool();
-    if (pool && await ensureSharedDashboardTable(pool)) {
-      let result: { rows: Array<{ revision: string }> } | null = null;
-      try {
-        result = expectedRevision === null
-          ? await pool.query(`INSERT INTO public.dashboard_shared_state(storage_key,payload,updated_at) VALUES($1,$2::jsonb,$3)
-              ON CONFLICT(storage_key) DO NOTHING RETURNING updated_at::text AS revision`, [storageKey, serialized, revision])
-          : await pool.query(`UPDATE public.dashboard_shared_state SET payload=$2::jsonb,updated_at=$3 WHERE storage_key=$1 AND updated_at=$4 RETURNING updated_at::text AS revision`, [storageKey, serialized, revision, expectedRevision]);
-      } catch (error) {
-        if (error instanceof SharedDashboardConflictError) throw error;
-        /* Try the Supabase Data API below. */
-      }
-      if (result) {
-        if (!result.rows[0]) throw new SharedDashboardConflictError('Shared data changed in another session. Refresh this page and retry your edit.');
-        const savedRevision = result.rows[0].revision;
-        if (!process.env.VERCEL) {
-          try { db().prepare(`INSERT INTO dashboard_shared_state(storage_key,payload,updated_at) VALUES(?,?,?)
-            ON CONFLICT(storage_key) DO UPDATE SET payload=excluded.payload,updated_at=excluded.updated_at`).run(storageKey, serialized, savedRevision); }
-          catch { /* Supabase is already the confirmed source of truth. */ }
-        }
-        return { storageMode, revision: savedRevision };
-      }
-    }
     const client = getSupabaseAdmin();
     if (!client) throw new Error('Supabase service key is not configured.');
     const query = expectedRevision === null
@@ -431,11 +413,6 @@ export async function writeSharedDashboardValue(storageKey: string, payload: unk
     if (error) throw sharedDashboardApiError('save', error);
     if (!data) throw new SharedDashboardConflictError('Shared data changed in another session. Refresh this page and retry your edit.');
     const savedRevision = data.updated_at;
-    if (process.env.VERCEL) return { storageMode, revision: savedRevision };
-    try {
-      db().prepare(`INSERT INTO dashboard_shared_state(storage_key,payload,updated_at) VALUES(?,?,?)
-        ON CONFLICT(storage_key) DO UPDATE SET payload=excluded.payload,updated_at=excluded.updated_at`).run(storageKey, serialized, savedRevision);
-    } catch { /* Supabase is already the confirmed source of truth. */ }
     return { storageMode, revision: savedRevision };
   }
   const localResult = expectedRevision === null
@@ -453,7 +430,7 @@ function expensePool(): Pool | null {
   if (!globalForDb.ellextExpensePool) {
     const databaseHost = new URL(connectionString).hostname;
     const ssl = ['localhost', '127.0.0.1', '::1'].includes(databaseHost) ? false : { rejectUnauthorized: false };
-    globalForDb.ellextExpensePool = new Pool({ connectionString, ssl, max: 2, connectionTimeoutMillis: 2500, query_timeout: 4000 });
+    globalForDb.ellextExpensePool = new Pool({ connectionString, ssl, max: 2, connectionTimeoutMillis: 1000, query_timeout: 2000 });
   }
   return globalForDb.ellextExpensePool;
 }

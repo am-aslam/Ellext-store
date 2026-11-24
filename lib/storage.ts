@@ -32,13 +32,25 @@ export type CurrencyRateSnapshot = { usdToInr: number; updatedAt: string };
 // `increaseInr` keeps the existing storage shape; it now stores the complete
 // company selling price (including the INR buy value), not an amount added on top.
 export type ProductIncrease = { sourceId: string; increaseInr: number; locked: boolean; updatedAt: string };
-export type SellingEntry = { sourceId: string; soldCount: number; unitExpense?: number; unitExpenseNote?: string; updatedAt: string };
+export type SellingEntry = {
+  sourceId: string;
+  soldCount: number;
+  unitExpense?: number;
+  unitExpenseNote?: string;
+  retailerAmountInr?: number;
+  retailerSoldCount?: number;
+  retailerUpdatedAt?: string;
+  updatedAt: string;
+};
 
 export function isStoredSellingEntries(value: unknown): value is SellingEntry[] {
   return Array.isArray(value) && value.every(item => isRecord(item)
     && typeof item.sourceId === 'string' && Number.isInteger(item.soldCount) && Number(item.soldCount) >= 0
     && (item.unitExpense === undefined || (Number.isFinite(item.unitExpense) && Number(item.unitExpense) >= 0))
     && (item.unitExpenseNote === undefined || (typeof item.unitExpenseNote === 'string' && item.unitExpenseNote.length <= 500))
+    && (item.retailerAmountInr === undefined || (Number.isFinite(item.retailerAmountInr) && Number(item.retailerAmountInr) > 0))
+    && (item.retailerSoldCount === undefined || (Number.isInteger(item.retailerSoldCount) && Number(item.retailerSoldCount) >= 0))
+    && (item.retailerUpdatedAt === undefined || isTimestamp(item.retailerUpdatedAt))
     && isTimestamp(item.updatedAt));
 }
 

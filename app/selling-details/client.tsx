@@ -4,7 +4,7 @@ import Image from 'next/image';
 import Link from 'next/link';
 import { BrandLogo } from '@/components/brand-logo';
 import { useEffect, useMemo, useState } from 'react';
-import { ArrowLeftRight, Check, ChartNoAxesColumnIncreasing, LayoutDashboard, LockKeyhole, LogOut, Percent, Plus, ReceiptText, UnlockKeyhole, X } from 'lucide-react';
+import { ArrowLeftRight, Check, ChartNoAxesColumnIncreasing, LayoutDashboard, LockKeyhole, LogOut, Percent, Plus, ReceiptText, Store, UnlockKeyhole, X } from 'lucide-react';
 import { isStoredCurrencyRows, isStoredProductIncreases, isStoredSellingEntries, storageKeys, type CurrencyRow, type ProductIncrease, type SellingEntry } from '../../lib/storage';
 import { MobileFinanceNav } from '../../components/mobile-finance-nav';
 import { loadSharedDashboardValue, saveSharedDashboardValue } from '../../lib/shared-dashboard';
@@ -59,11 +59,13 @@ export default function SellingDetailsPage() {
   const saveSoldCount = async (row: CurrencyRow) => {
     const rawValue = drafts[row.id] ?? '0';
     const soldCount = Number(rawValue);
-    if (!Number.isInteger(soldCount) || soldCount < 0 || soldCount > row.productCount) {
-      setErrors(current => ({ ...current, [row.id]: `Enter 0–${row.productCount} sold items.` }));
+    const retailSold = entryMap.get(row.id)?.retailerSoldCount ?? 0;
+    const directLimit = Math.max(0, row.productCount - retailSold);
+    if (!Number.isInteger(soldCount) || soldCount < 0 || soldCount > directLimit) {
+      setErrors(current => ({ ...current, [row.id]: `Enter 0–${directLimit} sold items after retailer sales.` }));
       return;
     }
-    const entry: SellingEntry = { sourceId: row.id, soldCount, updatedAt: new Date().toISOString() };
+    const entry: SellingEntry = { ...entryMap.get(row.id), sourceId: row.id, soldCount, updatedAt: new Date().toISOString() };
     const nextEntries = [...entries.filter(item => item.sourceId !== row.id), entry];
     try {
       const storageMode = await saveSharedDashboardValue(storageKeys.sellingEntries, nextEntries);
@@ -101,6 +103,7 @@ export default function SellingDetailsPage() {
           <Link className="nav-link" href="/currency-exchange"><ArrowLeftRight size={19} strokeWidth={1.8} /><span>Currency Exchange</span></Link>
           <Link className="nav-link" href="/product-percentage"><Percent size={19} strokeWidth={1.8} /><span>Product Percentage</span></Link>
           <Link className="nav-link selected" href="/selling-details"><ChartNoAxesColumnIncreasing size={19} strokeWidth={1.8} /><span>Selling Details</span></Link>
+          <Link className="nav-link" href="/ellext-retailers"><Store size={19} strokeWidth={1.8} /><span>Retailers</span></Link>
           <Link className="nav-link" href="/expense-ledger"><ReceiptText size={19} strokeWidth={1.8} /><span>Expense Ledger</span></Link>
         </nav>
         <div className="currency-sidebar-note"><span className="currency-rate-icon"><ChartNoAxesColumnIncreasing size={18} /></span><span>Units sold<br /><b>{totals.sold.toLocaleString('en-IN')}</b></span></div>
@@ -128,7 +131,7 @@ export default function SellingDetailsPage() {
               <td className="currency-description" title={row.description}><span>{row.description}</span></td>
               <td className="currency-money">{companyAmount === undefined ? '—' : formatMoney(companyAmount)}</td>
               <td><span className="product-count-pill">{row.productCount.toLocaleString('en-IN')}</span></td>
-              <td><div className={`selling-count-editor ${editingIds.includes(row.id) ? 'count-editing' : 'count-locked'}`}><label className="visually-hidden" htmlFor={`sold-${row.id}`}>Sold item count for {row.description}</label><input id={`sold-${row.id}`} type="number" min="0" max={row.productCount} step="1" value={drafts[row.id] ?? '0'} disabled={!editingIds.includes(row.id)} onChange={event => changeSoldDraft(row, event.target.value)} />{editingIds.includes(row.id) ? <><button onClick={() => saveSoldCount(row)} aria-label={`Save and lock sold count for ${row.description}`} title="Save and lock"><Check size={15} /></button><button className="count-lock-button" onClick={() => lockSoldCount(row)} aria-label={`Cancel and lock sold count for ${row.description}`} title="Cancel and lock"><LockKeyhole size={14} /></button></> : <button className="count-unlock-button" onClick={() => unlockSoldCount(row)} aria-label={`Unlock sold count for ${row.description}`} title="Unlock to edit"><UnlockKeyhole size={15} /></button>}{errors[row.id] && <small className="increase-error" role="alert">{errors[row.id]}</small>}</div></td>
+              <td><div className={`selling-count-editor ${editingIds.includes(row.id) ? 'count-editing' : 'count-locked'}`}><label className="visually-hidden" htmlFor={`sold-${row.id}`}>Sold item count for {row.description}</label><input id={`sold-${row.id}`} type="number" min="0" max={Math.max(0,row.productCount-(entryMap.get(row.id)?.retailerSoldCount??0))} step="1" value={drafts[row.id] ?? '0'} disabled={!editingIds.includes(row.id)} onChange={event => changeSoldDraft(row, event.target.value)} />{editingIds.includes(row.id) ? <><button onClick={() => saveSoldCount(row)} aria-label={`Save and lock sold count for ${row.description}`} title="Save and lock"><Check size={15} /></button><button className="count-lock-button" onClick={() => lockSoldCount(row)} aria-label={`Cancel and lock sold count for ${row.description}`} title="Cancel and lock"><LockKeyhole size={14} /></button></> : <button className="count-unlock-button" onClick={() => unlockSoldCount(row)} aria-label={`Unlock sold count for ${row.description}`} title="Unlock to edit"><UnlockKeyhole size={15} /></button>}{errors[row.id] && <small className="increase-error" role="alert">{errors[row.id]}</small>}</div></td>
               <td className="currency-money">{collected === null ? '—' : formatMoney(collected)}</td>
             </tr>;
           })}</tbody>
@@ -140,7 +143,7 @@ export default function SellingDetailsPage() {
           const collected = unitSell === null ? null : unitSell * soldCount;
           return <article className="selling-mobile-card" key={row.id}>
             <div className="selling-mobile-head"><button className="currency-image-button" onClick={() => setPreview(row)} aria-label={`Preview image for ${row.description}`}><Image src={row.image} alt={row.description} fill sizes="64px" unoptimized /></button><div><span>{formatDate(row.date)}</span><b>{row.description}</b></div></div>
-            <div className="selling-mobile-values"><div><span>Company amount</span><b>{companyAmount === undefined ? '—' : formatMoney(companyAmount)}</b></div><div><span>Products available</span><b>{row.productCount.toLocaleString('en-IN')}</b></div><div><span>Collected</span><b>{collected === null ? '—' : formatMoney(collected)}</b></div><div><span>Sold items</span><div className={`selling-count-editor ${editingIds.includes(row.id) ? 'count-editing' : 'count-locked'}`}><label className="visually-hidden" htmlFor={`mobile-sold-${row.id}`}>Sold item count for {row.description}</label><input id={`mobile-sold-${row.id}`} type="number" min="0" max={row.productCount} step="1" value={drafts[row.id] ?? '0'} disabled={!editingIds.includes(row.id)} onChange={event => changeSoldDraft(row, event.target.value)} />{editingIds.includes(row.id) ? <><button onClick={() => saveSoldCount(row)} aria-label={`Save and lock sold count for ${row.description}`} title="Save and lock"><Check size={15} /></button><button className="count-lock-button" onClick={() => lockSoldCount(row)} aria-label={`Cancel and lock sold count for ${row.description}`} title="Cancel and lock"><LockKeyhole size={14} /></button></> : <button className="count-unlock-button" onClick={() => unlockSoldCount(row)} aria-label={`Unlock sold count for ${row.description}`} title="Unlock to edit"><UnlockKeyhole size={15} /></button>}{errors[row.id] && <small className="increase-error" role="alert">{errors[row.id]}</small>}</div></div></div>
+            <div className="selling-mobile-values"><div><span>Company amount</span><b>{companyAmount === undefined ? '—' : formatMoney(companyAmount)}</b></div><div><span>Products available</span><b>{row.productCount.toLocaleString('en-IN')}</b></div><div><span>Collected</span><b>{collected === null ? '—' : formatMoney(collected)}</b></div><div><span>Sold items</span><div className={`selling-count-editor ${editingIds.includes(row.id) ? 'count-editing' : 'count-locked'}`}><label className="visually-hidden" htmlFor={`mobile-sold-${row.id}`}>Sold item count for {row.description}</label><input id={`mobile-sold-${row.id}`} type="number" min="0" max={Math.max(0,row.productCount-(entryMap.get(row.id)?.retailerSoldCount??0))} step="1" value={drafts[row.id] ?? '0'} disabled={!editingIds.includes(row.id)} onChange={event => changeSoldDraft(row, event.target.value)} />{editingIds.includes(row.id) ? <><button onClick={() => saveSoldCount(row)} aria-label={`Save and lock sold count for ${row.description}`} title="Save and lock"><Check size={15} /></button><button className="count-lock-button" onClick={() => lockSoldCount(row)} aria-label={`Cancel and lock sold count for ${row.description}`} title="Cancel and lock"><LockKeyhole size={14} /></button></> : <button className="count-unlock-button" onClick={() => unlockSoldCount(row)} aria-label={`Unlock sold count for ${row.description}`} title="Unlock to edit"><UnlockKeyhole size={15} /></button>}{errors[row.id] && <small className="increase-error" role="alert">{errors[row.id]}</small>}</div></div></div>
           </article>;
         })}</div></> : <div className="currency-empty percentage-empty-state"><span className="currency-empty-icon"><ChartNoAxesColumnIncreasing size={20} /></span><strong>No products to record sales for</strong><p>Add active product rows in Currency Exchange. They will appear here with their company selling amount and available product count.</p><Link href="/currency-exchange" className="currency-empty-link"><ArrowLeftRight size={15} /> Go to Currency Exchange</Link></div>}
         <footer className="currency-source"><span className="rate-dot" />Collected amount = sold item count × company amount. Record operating expenses in the Expense Ledger to update Company Growth.</footer>

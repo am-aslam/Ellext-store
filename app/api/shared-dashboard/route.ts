@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
-import { getCurrentUser, readSharedDashboardValue, SharedDashboardConflictError, writeSharedDashboardValue } from '@/lib/auth';
+import { randomUUID } from 'node:crypto';
+import { getCurrentUser, readSharedDashboardValue, readSharedDashboardValues, SharedDashboardConflictError, writeSharedDashboardValue } from '@/lib/auth';
 import { isStoredCurrencyRate, isStoredCurrencyRows, isStoredProductIncreases, isStoredSellingEntries, storageKeys } from '@/lib/storage';
 
 export const runtime = 'nodejs';
@@ -14,12 +15,45 @@ const validators: Record<string, (value: unknown) => boolean> = {
 };
 
 export async function GET(request: Request) {
+  const requestId = randomUUID();
+  const startedAt = performance.now();
+  let authDurationMs = 0;
+  let keys: string[] = [];
+  let retryCount = 0;
+  let status = 200;
+  let serializationDurationMs = 0;
+  let responseBytes = 0;
+  let failureCategory: string | undefined;
+  const log = () => console.info(JSON.stringify({ event: 'shared_dashboard_api', requestId, method: 'GET', endpoint: '/api/shared-dashboard', durationMs: Math.round(performance.now() - startedAt), authDurationMs, serializationDurationMs, responseBytes, status, keyCount: keys.length, retryCount, failureCategory: failureCategory ?? null }));
+  const respond = (body: unknown) => {
+    const serializationStartedAt = performance.now();
+    const serialized = JSON.stringify(body);
+    serializationDurationMs = Math.round(performance.now() - serializationStartedAt);
+    responseBytes = Buffer.byteLength(serialized);
+    log();
+    return new NextResponse(serialized, { headers: { 'content-type': 'application/json; charset=utf-8', 'x-request-id': requestId } });
+  };
   const user = await getCurrentUser();
-  if (!user) return NextResponse.json({ error: 'Sign in to view shared company data.' }, { status: 401 });
-  const key = new URL(request.url).searchParams.get('key') || '';
-  if (!validators[key]) return NextResponse.json({ error: 'Unknown shared data key.' }, { status: 400 });
-  try { return NextResponse.json(await readSharedDashboardValue(key)); }
-  catch (error) { return NextResponse.json({ error: error instanceof Error ? error.message : 'Unable to load shared company data.' }, { status: 503 }); }
+  authDurationMs = Math.round(performance.now() - startedAt);
+  if (!user) { status = 401; failureCategory = 'unauthorized'; log(); return NextResponse.json({ error: 'Sign in to view shared company data.' }, { status }); }
+  const params = new URL(request.url).searchParams;
+  retryCount = Math.max(0, Math.min(10, Number(params.get('attempt')) || 0));
+  keys = params.get('keys')?.split(',').filter(Boolean) ?? [params.get('key') || ''];
+  keys = Array.from(new Set(keys));
+  if (!keys.length || keys.some(key => !validators[key])) { status = 400; failureCategory = 'invalid_key'; log(); return NextResponse.json({ error: 'Unknown shared data key.' }, { status }); }
+  try {
+    if (keys.length === 1 && !params.has('keys')) {
+      const snapshot = await readSharedDashboardValue(keys[0], requestId);
+      return respond(snapshot);
+    }
+    const snapshots = await readSharedDashboardValues(keys, requestId);
+    return respond({ snapshots });
+  } catch (error) {
+    status = error instanceof Error && error.name === 'TimeoutError' ? 504 : 503;
+    failureCategory = status === 504 ? 'timeout' : 'storage_unavailable';
+    log();
+    return NextResponse.json({ error: error instanceof Error ? error.message : 'Unable to load shared company data.', requestId }, { status, headers: { 'x-request-id': requestId } });
+  }
 }
 
 export async function PUT(request: Request) {

@@ -4,7 +4,7 @@ import Image from 'next/image';
 import Link from 'next/link';
 import { BrandLogo } from '@/components/brand-logo';
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from 'react';
-import { ArrowLeftRight, Archive, ChartNoAxesColumnIncreasing, Check, LayoutDashboard, LogOut, Pencil, Percent, Plus, ReceiptText, Trash2, Upload, X } from 'lucide-react';
+import { ArrowLeftRight, Archive, ChartNoAxesColumnIncreasing, Check, LayoutDashboard, LogOut, Pencil, Percent, Plus, ReceiptText, Store, Trash2, Upload, X } from 'lucide-react';
 import { defaultProductCategories, isStoredCurrencyRate, isStoredCurrencyRows, isStoredSellingEntries, storageKeys, type CurrencyRateSnapshot, type CurrencyRow } from '../../lib/storage';
 import { MobileFinanceNav } from '../../components/mobile-finance-nav';
 import { loadSharedDashboardValue, saveSharedDashboardValue } from '../../lib/shared-dashboard';
@@ -126,7 +126,7 @@ export default function CurrencyExchangePage() {
         const context = canvas.getContext('2d');
         if (!context) { setError('This image could not be prepared for storage.'); return; }
         context.drawImage(source, 0, 0, canvas.width, canvas.height);
-        setImage(canvas.toDataURL('image/webp', 0.78));
+        setImage(canvas.toDataURL('image/jpeg', 0.9));
         setImageName(file.name);
         setError('');
       };
@@ -165,6 +165,7 @@ export default function CurrencyExchangePage() {
           <Link className="nav-link selected" href="/currency-exchange"><ArrowLeftRight size={19} strokeWidth={1.8} /><span>Currency Exchange</span></Link>
           <Link className="nav-link" href="/product-percentage"><Percent size={19} strokeWidth={1.8} /><span>Product Percentage</span></Link>
           <Link className="nav-link" href="/selling-details"><ChartNoAxesColumnIncreasing size={19} strokeWidth={1.8} /><span>Selling Details</span></Link>
+          <Link className="nav-link" href="/ellext-retailers"><Store size={19} strokeWidth={1.8} /><span>Retailers</span></Link>
           <Link className="nav-link" href="/expense-ledger"><ReceiptText size={19} strokeWidth={1.8} /><span>Expense Ledger</span></Link>
         </nav>
         <div className="currency-sidebar-note"><span className="currency-rate-icon"><ArrowLeftRight size={18} /></span><span>Daily USD to INR<br /><b>{rate ? rate.usdToInr.toFixed(2) : 'Loading rate'}</b></span></div>

@@ -4,7 +4,7 @@ import Image from 'next/image';
 import Link from 'next/link';
 import { BrandLogo } from '@/components/brand-logo';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { ArrowLeftRight, ChartNoAxesColumnIncreasing, LayoutDashboard, LogOut, Menu, Percent, ReceiptText, ShieldCheck, ShoppingBag, TrendingUp, X } from 'lucide-react';
+import { ArrowLeftRight, ChartNoAxesColumnIncreasing, LayoutDashboard, LogOut, Menu, Percent, ReceiptText, ShieldCheck, ShoppingBag, Store, TrendingUp, X } from 'lucide-react';
 import { isStoredCurrencyRows, isStoredProductIncreases, isStoredSellingEntries, readVersioned, storageKeys, type CurrencyRow, type ProductIncrease, type SellingEntry } from '../lib/storage';
 import { loadSharedDashboardValue } from '../lib/shared-dashboard';
 
@@ -52,6 +52,7 @@ function DashboardSidebar({ open, onClose, data, isSuperAdmin }: { open: boolean
         <Link className="nav-link" href="/currency-exchange" onClick={onClose}><ArrowLeftRight size={19} /><span>Currency Exchange</span></Link>
         <Link className="nav-link" href="/product-percentage" onClick={onClose}><Percent size={19} /><span>Product Percentage</span></Link>
         <Link className="nav-link" href="/selling-details" onClick={onClose}><ChartNoAxesColumnIncreasing size={19} /><span>Selling Details</span></Link>
+        <Link className="nav-link" href="/ellext-retailers" onClick={onClose}><Store size={19} /><span>Retailers</span></Link>
         <Link className="nav-link" href="/expense-ledger" onClick={onClose}><ReceiptText size={19} /><span>Expense Ledger</span></Link>
         {isSuperAdmin && <Link className="nav-link" href="/super-admin" onClick={onClose}><ShieldCheck size={19} /><span>Super Admin</span></Link>}
         {isSuperAdmin && <Link className="nav-link" href="/company-growth" onClick={onClose}><TrendingUp size={19} /><span>Company Growth</span></Link>}
