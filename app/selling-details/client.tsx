@@ -5,7 +5,7 @@ import Link from 'next/link';
 import { BrandLogo } from '@/components/brand-logo';
 import { useEffect, useMemo, useState } from 'react';
 import { ArrowLeftRight, Check, ChartNoAxesColumnIncreasing, LayoutDashboard, LockKeyhole, LogOut, Percent, Plus, ReceiptText, UnlockKeyhole, X } from 'lucide-react';
-import { isStoredCurrencyRows, isStoredProductIncreases, isStoredSellingEntries, readVersioned, storageKeys, type CurrencyRow, type ProductIncrease, type SellingEntry } from '../../lib/storage';
+import { isStoredCurrencyRows, isStoredProductIncreases, isStoredSellingEntries, storageKeys, type CurrencyRow, type ProductIncrease, type SellingEntry } from '../../lib/storage';
 import { MobileFinanceNav } from '../../components/mobile-finance-nav';
 import { loadSharedDashboardValue, saveSharedDashboardValue } from '../../lib/shared-dashboard';
 
@@ -19,7 +19,6 @@ export default function SellingDetailsPage() {
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [editingIds, setEditingIds] = useState<string[]>([]);
   const [errors, setErrors] = useState<Record<string, string>>({});
-  const [hydrated, setHydrated] = useState(false);
   const [preview, setPreview] = useState<CurrencyRow | null>(null);
   const [notice, setNotice] = useState('');
   const signOut = async () => { await fetch('/api/auth/sign-out', { method: 'POST' }); window.location.assign('/sign-in'); };
@@ -28,7 +27,7 @@ export default function SellingDetailsPage() {
     let active = true;
     const load = async <T,>(key: typeof storageKeys.currencyRows | typeof storageKeys.productIncreases | typeof storageKeys.sellingEntries, validate: (value: unknown) => value is T, fallback: T): Promise<T> => {
       try { return await loadSharedDashboardValue(key, validate) ?? fallback; }
-      catch { if (active) setNotice('Shared company data is unavailable. Showing saved data on this device.'); return readVersioned(key, validate) ?? fallback; }
+      catch { if (active) setNotice('Shared company data is unavailable. Device data was preserved for recovery; reconnect before editing shared records.'); return fallback; }
     };
     void (async () => {
       const [rows, savedIncreases, savedEntries] = await Promise.all([
@@ -39,11 +38,9 @@ export default function SellingDetailsPage() {
       if (!active) return;
       setSourceRows(rows); setIncreases(savedIncreases); setEntries(savedEntries);
       setDrafts(Object.fromEntries(savedEntries.map(entry => [entry.sourceId, String(entry.soldCount)])));
-      setHydrated(true);
     })();
     return () => { active = false; };
   }, []);
-  useEffect(() => { if (hydrated) void saveSharedDashboardValue(storageKeys.sellingEntries, entries).catch(() => setNotice('Sales remain saved on this device but could not sync to shared storage.')); }, [hydrated, entries]);
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') setPreview(null); };
     window.addEventListener('keydown', onKeyDown);
@@ -59,7 +56,7 @@ export default function SellingDetailsPage() {
     return { sold: total.sold + sold, collected: sellingUnit === null ? total.collected : total.collected + sold * sellingUnit, hasPrice: total.hasPrice || sellingUnit !== null };
   }, { sold: 0, collected: 0, hasPrice: false }), [rows, entryMap, companyAmountMap]);
 
-  const saveSoldCount = (row: CurrencyRow) => {
+  const saveSoldCount = async (row: CurrencyRow) => {
     const rawValue = drafts[row.id] ?? '0';
     const soldCount = Number(rawValue);
     if (!Number.isInteger(soldCount) || soldCount < 0 || soldCount > row.productCount) {
@@ -67,10 +64,16 @@ export default function SellingDetailsPage() {
       return;
     }
     const entry: SellingEntry = { sourceId: row.id, soldCount, updatedAt: new Date().toISOString() };
-    setEntries(current => [...current.filter(item => item.sourceId !== row.id), entry]);
-    setEditingIds(current => current.filter(id => id !== row.id));
-    setErrors(current => ({ ...current, [row.id]: '' }));
-    setNotice(`Sales updated for ${row.description}`);
+    const nextEntries = [...entries.filter(item => item.sourceId !== row.id), entry];
+    try {
+      const storageMode = await saveSharedDashboardValue(storageKeys.sellingEntries, nextEntries);
+      setEntries(nextEntries);
+      setEditingIds(current => current.filter(id => id !== row.id));
+      setErrors(current => ({ ...current, [row.id]: '' }));
+      setNotice(storageMode === 'sqlite' ? `Saved locally only for ${row.description}; Supabase is unavailable, so other accounts will not see this update yet.` : `Sales updated for ${row.description}`);
+    } catch (cause) {
+      setErrors(current => ({ ...current, [row.id]: cause instanceof Error ? `${cause.message} The entry was preserved for recovery.` : 'Could not save the sold count.' }));
+    }
   };
   const unlockSoldCount = (row: CurrencyRow) => {
     setDrafts(current => ({ ...current, [row.id]: String(entryMap.get(row.id)?.soldCount ?? 0) }));

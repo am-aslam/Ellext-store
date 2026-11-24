@@ -5,7 +5,7 @@ import Link from 'next/link';
 import { BrandLogo } from '@/components/brand-logo';
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from 'react';
 import { ArrowLeftRight, Archive, ChartNoAxesColumnIncreasing, Check, LayoutDashboard, LogOut, Pencil, Percent, Plus, ReceiptText, Trash2, Upload, X } from 'lucide-react';
-import { defaultProductCategories, isStoredCurrencyRate, isStoredCurrencyRows, isStoredSellingEntries, readVersioned, storageKeys, writeVersioned, type CurrencyRateSnapshot, type CurrencyRow } from '../../lib/storage';
+import { defaultProductCategories, isStoredCurrencyRate, isStoredCurrencyRows, isStoredSellingEntries, storageKeys, type CurrencyRateSnapshot, type CurrencyRow } from '../../lib/storage';
 import { MobileFinanceNav } from '../../components/mobile-finance-nav';
 import { loadSharedDashboardValue, saveSharedDashboardValue } from '../../lib/shared-dashboard';
 
@@ -43,7 +43,7 @@ export default function CurrencyExchangePage() {
     let active = true;
     const load = async <T,>(key: typeof storageKeys.currencyRows | typeof storageKeys.currencyRate | typeof storageKeys.sellingEntries | typeof storageKeys.productCategories, validate: (value: unknown) => value is T, fallback: T): Promise<T> => {
       try { return await loadSharedDashboardValue(key, validate) ?? fallback; }
-      catch { if (active) setNotice('Shared company data is unavailable. Showing saved data on this device.'); return readVersioned(key, validate) ?? fallback; }
+      catch { if (active) setNotice('Shared company data is unavailable. Device data was preserved for recovery; reconnect before editing shared records.'); return fallback; }
     };
     void (async () => {
       const [savedRows, savedCategories, selling, savedRate] = await Promise.all([
@@ -73,11 +73,11 @@ export default function CurrencyExchangePage() {
       const data = await response.json() as ExchangeApiResponse;
       if (data.result !== 'success' || data.base_code !== 'USD' || !data.rates?.INR || !Number.isFinite(data.rates.INR)) throw new Error('Exchange rate response was invalid');
       const snapshot = { usdToInr: data.rates.INR, updatedAt: data.time_last_update_utc ? new Date(data.time_last_update_utc).toISOString() : new Date().toISOString() };
+      const storageMode = await saveSharedDashboardValue(storageKeys.currencyRate, snapshot);
       setRate(snapshot);
       cachedRate.current = snapshot;
       setRateStatus('live');
-      writeVersioned(storageKeys.currencyRate, snapshot);
-      void saveSharedDashboardValue(storageKeys.currencyRate, snapshot).catch(() => setNotice('Exchange rate could not sync to shared storage.'));
+      if (storageMode === 'sqlite') setNotice('Exchange rate saved locally; Supabase is unavailable, so other accounts will not see this update yet.');
     } catch (cause) {
       setRateError(cause instanceof DOMException && cause.name === 'AbortError' ? 'Rate request timed out after 4 seconds.' : cause instanceof Error ? cause.message : 'Could not load the exchange rate');
       setRateStatus(cachedRate.current ? 'cached' : 'unavailable');
@@ -95,9 +95,6 @@ export default function CurrencyExchangePage() {
     return () => window.clearInterval(interval);
   }, [hydrated, refreshRate]);
 
-  useEffect(() => { if (hydrated) void saveSharedDashboardValue(storageKeys.currencyRows, rows).catch(() => setNotice('Product rows remain saved on this device but could not sync to shared storage.')); }, [hydrated, rows]);
-  useEffect(() => { if (hydrated) void saveSharedDashboardValue(storageKeys.productCategories, categories.filter(item => !defaultProductCategories.includes(item))).catch(() => setNotice('Categories remain saved on this device but could not sync to shared storage.')); }, [hydrated, categories]);
-  useEffect(() => { if (hydrated && rate) void saveSharedDashboardValue(storageKeys.currencyRate, rate).catch(() => setNotice('Exchange rate remains saved on this device but could not sync to shared storage.')); }, [hydrated, rate]);
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') { setModalOpen(false); setPreview(null); } };
     window.addEventListener('keydown', onKeyDown);
@@ -139,26 +136,24 @@ export default function CurrencyExchangePage() {
     reader.onerror = () => setError('The selected image could not be read.');
     reader.readAsDataURL(file);
   };
-  const saveRow = (event: FormEvent<HTMLFormElement>) => {
+  const saveRow = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (description.trim().length < 2) { setError('Add a description with at least 2 characters.'); return; }
     const usdAmount = Number(usd), count = Number(productCount);
     if (!Number.isFinite(usdAmount) || usdAmount <= 0) { setError('Enter a USD amount greater than 0.'); return; }
     if (!Number.isInteger(count) || count < 1 || count > 999999) { setError('Enter a product count from 1 to 999,999.'); return; }
     if (!image) { setError('Add an image to continue.'); return; }
-    if (editingId) {
-      setRows(current => current.map(row => row.id === editingId ? { ...row, description: description.trim(), usd: usdAmount, productCount: count, image, category } : row));
-      setNotice('Exchange row updated');
-    } else {
-      setRows(current => [...current, { id: crypto.randomUUID(), date: new Date().toISOString(), image, description: description.trim(), usd: usdAmount, productCount: count, active: true, category }]);
-      setNotice('Exchange row added');
-    }
-    setModalOpen(false);
-    resetForm();
+    const nextRows = editingId
+      ? rows.map(row => row.id === editingId ? { ...row, description: description.trim(), usd: usdAmount, productCount: count, image, category } : row)
+      : [...rows, { id: crypto.randomUUID(), date: new Date().toISOString(), image, description: description.trim(), usd: usdAmount, productCount: count, active: true, category }];
+    try {
+      const storageMode = await saveSharedDashboardValue(storageKeys.currencyRows, nextRows);
+      setRows(nextRows); setNotice(storageMode === 'sqlite' ? 'Saved locally only. Supabase is unavailable; other accounts will not see this row yet.' : editingId ? 'Exchange row updated' : 'Exchange row added'); setModalOpen(false); resetForm();
+    } catch (cause) { setError(cause instanceof Error ? `${cause.message} The draft was preserved for recovery.` : 'Could not save the exchange row. The draft was preserved for recovery.'); }
   };
-  const deleteRow = (id: string) => { setRows(current => current.filter(row => row.id !== id)); setNotice('Exchange row deleted'); };
-  const archiveRow = (id: string) => { setRows(current => current.map(row => row.id === id ? { ...row, active: !row.active } : row)); setNotice(showArchived ? 'Exchange row restored' : 'Exchange row archived'); };
-  const addCategory = () => { const next = newCategory.trim(); if (!next) return; if (categories.some(item => item.toLowerCase() === next.toLowerCase())) { setError('That category already exists.'); return; } setCategories(current => [...current, next]); setCategory(next); setNewCategory(''); setCategoryModalOpen(false); setNotice(`Category added: ${next}`); };
+  const deleteRow = async (id: string) => { const nextRows = rows.filter(row => row.id !== id); try { const mode = await saveSharedDashboardValue(storageKeys.currencyRows, nextRows); setRows(nextRows); setNotice(mode === 'sqlite' ? 'Deleted locally only; Supabase is unavailable, so the change is not shared.' : 'Exchange row deleted'); } catch (cause) { setNotice(cause instanceof Error ? cause.message : 'Could not delete the exchange row.'); } };
+  const archiveRow = async (id: string) => { const nextRows = rows.map(row => row.id === id ? { ...row, active: !row.active } : row); try { const mode = await saveSharedDashboardValue(storageKeys.currencyRows, nextRows); setRows(nextRows); setNotice(mode === 'sqlite' ? 'Updated locally only; Supabase is unavailable, so the change is not shared.' : showArchived ? 'Exchange row restored' : 'Exchange row archived'); } catch (cause) { setNotice(cause instanceof Error ? cause.message : 'Could not update the exchange row.'); } };
+  const addCategory = async () => { const next = newCategory.trim(); if (!next) return; if (categories.some(item => item.toLowerCase() === next.toLowerCase())) { setError('That category already exists.'); return; } const nextCategories = [...categories, next]; try { const mode = await saveSharedDashboardValue(storageKeys.productCategories, nextCategories.filter(item => !defaultProductCategories.includes(item))); setCategories(nextCategories); setCategory(next); setNewCategory(''); setCategoryModalOpen(false); setNotice(mode === 'sqlite' ? `Category saved locally only: ${next}` : `Category added: ${next}`); } catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not save the category.'); } };
   const signOut = async () => { await fetch('/api/auth/sign-out', { method: 'POST' }); window.location.assign('/sign-in'); };
 
   return <main className="page-shell">

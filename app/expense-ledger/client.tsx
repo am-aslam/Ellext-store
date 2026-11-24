@@ -30,28 +30,29 @@ export default function ExpenseLedgerClient({ userName }: { userName: string }) 
       if (Array.isArray(result.entries) && isStoredExpenseLedger(result.entries)) {
         const serverEntries = result.entries;
         const pending = cached.filter(entry => entry.localOnly);
-        const synced = await Promise.all(pending.map(async entry => {
-          try {
-            const save = await fetch('/api/expense-ledger', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(entry), signal: AbortSignal.timeout(5000) });
-            if (!save.ok) return entry;
-            const saved = await save.json() as { entry?: ExpenseLedgerEntry };
-            return saved.entry ?? entry;
-          } catch { return entry; }
-        }));
         setEntries(current => {
           // Keep entries submitted while the initial server read was in flight.
           const submittedDuringLoad = current.filter(entry => !cachedIds.has(entry.id));
           const merged = new Map<string, ExpenseLedgerEntry>();
-          [...synced, ...serverEntries, ...submittedDuringLoad].forEach(entry => merged.set(entry.id, entry));
+          [...pending, ...serverEntries, ...submittedDuringLoad].forEach(entry => merged.set(entry.id, entry));
           return Array.from(merged.values()).sort((a, b) => Date.parse(b.date) - Date.parse(a.date));
         });
       }
     }).catch(() => setNotice(cached.length
       ? 'Showing saved browser data; shared expense storage is unavailable.'
-      : 'Expense storage is unavailable. Entries can be saved on this device and will sync when storage is restored.'));
+      : 'Expense storage is unavailable. New entries remain on this device until you retry them.'));
   }, []);
   useEffect(() => { if (hydrated) writeVersioned(storageKeys.expenseLedger, entries); }, [hydrated, entries]);
   const total = useMemo(() => entries.reduce((sum, entry) => sum + entry.amount, 0), [entries]);
+  const retryExpenseSync = async (entry: ExpenseLedgerEntry) => {
+    try {
+      const response = await fetch('/api/expense-ledger', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(entry), signal: AbortSignal.timeout(5000) });
+      const result = await response.json().catch(() => ({})) as { entry?: ExpenseLedgerEntry; error?: string };
+      if (!response.ok || !result.entry) throw new Error(result.error || 'Unable to sync this expense.');
+      setEntries(current => [result.entry!, ...current.filter(item => item.id !== entry.id)]);
+      setNotice('Expense synced to shared storage.');
+    } catch (cause) { setNotice(cause instanceof Error ? cause.message : 'Unable to sync this expense.'); }
+  };
   const addEntry = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (saving) return;
@@ -73,7 +74,7 @@ export default function ExpenseLedgerClient({ userName }: { userName: string }) 
       setEntries(current => [result.entry!, ...current.filter(entry => entry.id !== id && entry.id !== result.entry!.id)]);
       setNotice('Expense recorded and included in Company Growth.');
     } catch (cause) {
-      setNotice(cause instanceof Error ? `${cause.message} Saved on this device and will sync when available.` : 'Shared storage unavailable. Saved on this device and will sync when available.');
+      setNotice(cause instanceof Error ? `${cause.message} Saved on this device; retry sharing it when storage is available.` : 'Shared storage unavailable. Saved on this device; retry sharing it when storage is available.');
     } finally {
       setSaving(false);
     }
@@ -99,7 +100,7 @@ export default function ExpenseLedgerClient({ userName }: { userName: string }) 
     <section className="main-panel currency-main expense-main"><header className="currency-header"><div><div className="finance-mobile-topline"><MobileFinanceNav active="/expense-ledger"/><Link href="/" className="currency-mobile-home"><BrandLogo /></Link></div><span className="currency-kicker">ELLEXTSTORE · OPERATIONS</span><h1>Expense Ledger</h1><p>Record operating costs. Entries are included automatically in the Super Admin Company Growth report.</p></div></header>
       <section className="expense-overview"><div><span className="currency-kicker">TOTAL RECORDED</span><strong>{money(total)}</strong><small>{entries.length} expense {entries.length === 1 ? 'entry' : 'entries'} · Added by {userName}</small></div><div className="expense-overview-icon"><ReceiptText size={22}/></div></section>
       <div className="expense-layout"><section className="growth-panel"><div className="growth-panel-title"><div><span className="currency-kicker">NEW ENTRY</span><h2>Add an operating expense</h2></div></div><form className="expense-entry-form" onSubmit={addEntry}><label>Expense amount (INR)<input required type="number" min="0.01" step="0.01" value={amount} onChange={event => {setAmount(event.target.value);setError('');}} placeholder="0.00"/></label><label>Expense category<select required value={category} onChange={event => setCategory(event.target.value)}>{categories.map(item => <option key={item}>{item}</option>)}</select></label><label>Expense note<textarea required minLength={2} maxLength={500} value={note} onChange={event => {setNote(event.target.value);setError('');}} placeholder="Describe the cost, vendor, or purpose" rows={3}/></label>{error && <p className="form-error" role="alert">{error}</p>}<button className="form-submit" type="submit" disabled={saving}><Plus size={16}/>{saving ? 'Saving…' : 'Record expense'}</button></form></section>
-        <section className="growth-panel expense-history"><div className="growth-panel-title"><div><span className="currency-kicker">AUDIT TRAIL</span><h2>Expense entries</h2></div><b>{entries.length}</b></div>{entries.length ? <ul className="expense-ledger-list">{entries.map(entry => <li key={entry.id}><span className="expense-category-icon"><ReceiptText size={16}/></span><div className="expense-ledger-description"><b>{entry.note}</b><small>{entry.category} · {new Intl.DateTimeFormat('en-IN',{dateStyle:'medium',timeStyle:'short'}).format(new Date(entry.date))}</small></div><strong>{money(entry.amount)}</strong><button className="expense-delete" onClick={() => removeEntry(entry.id)} aria-label={`Remove ${entry.note} expense`} title="Remove expense"><Trash2 size={15}/></button></li>)}</ul> : <div className="currency-empty expense-empty"><span className="currency-empty-icon"><ReceiptText size={20}/></span><strong>No expenses recorded yet</strong><p>Entries added here will flow into net profit and net margin automatically.</p></div>}</section></div>
+        <section className="growth-panel expense-history"><div className="growth-panel-title"><div><span className="currency-kicker">AUDIT TRAIL</span><h2>Expense entries</h2></div><b>{entries.length}</b></div>{entries.length ? <ul className="expense-ledger-list">{entries.map(entry => <li key={entry.id}><span className="expense-category-icon"><ReceiptText size={16}/></span><div className="expense-ledger-description"><b>{entry.note}</b><small>{entry.category} · {new Intl.DateTimeFormat('en-IN',{dateStyle:'medium',timeStyle:'short'}).format(new Date(entry.date))}{entry.localOnly ? ' · Saved on this device' : ''}</small></div><strong>{money(entry.amount)}</strong>{entry.localOnly && <button className="expense-delete" onClick={() => void retryExpenseSync(entry)} aria-label={`Retry syncing ${entry.note} expense`} title="Retry sync">Retry</button>}<button className="expense-delete" onClick={() => removeEntry(entry.id)} aria-label={`Remove ${entry.note} expense`} title="Remove expense"><Trash2 size={15}/></button></li>)}</ul> : <div className="currency-empty expense-empty"><span className="currency-empty-icon"><ReceiptText size={20}/></span><strong>No expenses recorded yet</strong><p>Entries added here will flow into net profit and net margin automatically.</p></div>}</section></div>
     </section>
   </div>{notice && <div className="toast" role="status"><Check size={16}/>{notice}<button onClick={() => setNotice('')} aria-label="Dismiss">×</button></div>}</main>;
 }

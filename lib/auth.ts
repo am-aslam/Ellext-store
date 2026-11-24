@@ -258,11 +258,14 @@ async function ensureSharedDashboardTable(pool: Pool): Promise<boolean> {
   return ready;
 }
 
-function readLocalSharedDashboardValue(storageKey: string): unknown | null {
-  const record = db().prepare('SELECT payload FROM dashboard_shared_state WHERE storage_key=?').get(storageKey) as { payload: string } | undefined;
+type SharedDashboardSnapshot = { value: unknown | null; revision: string | null; storageMode: StorageMode };
+export class SharedDashboardConflictError extends Error {}
+
+function readLocalSharedDashboardValue(storageKey: string): { value: unknown; revision: string } | null {
+  const record = db().prepare('SELECT payload,updated_at FROM dashboard_shared_state WHERE storage_key=?').get(storageKey) as { payload: string; updated_at: string } | undefined;
   if (!record) return null;
-  try { return JSON.parse(record.payload) as unknown; }
-  catch { db().prepare('DELETE FROM dashboard_shared_state WHERE storage_key=?').run(storageKey); return null; }
+  try { return { value: JSON.parse(record.payload) as unknown, revision: record.updated_at }; }
+  catch { return null; }
 }
 
 function sharedDashboardApiError(action: string, error: { message: string; code?: string }): Error {
@@ -368,51 +371,78 @@ export async function checkSharedDashboardTable(): Promise<{ ready: boolean; err
   return { ready: false, error: 'Supabase shared dashboard table is unavailable or its permissions could not be verified.' };
 }
 
-export async function readSharedDashboardValue(storageKey: string): Promise<unknown | null> {
-  if (await getCompanyDataStorageMode() === 'supabase') {
+export async function readSharedDashboardValue(storageKey: string): Promise<SharedDashboardSnapshot> {
+  const storageMode = await getCompanyDataStorageMode();
+  if (storageMode === 'supabase') {
     const pool = expensePool();
     if (pool && await ensureSharedDashboardTable(pool)) {
       try {
-        const { rows } = await pool.query('SELECT payload FROM public.dashboard_shared_state WHERE storage_key=$1 LIMIT 1', [storageKey]);
-        if (rows[0]) return rows[0].payload as unknown;
-        if (process.env.VERCEL) return null;
-        return readLocalSharedDashboardValue(storageKey);
+        const { rows } = await pool.query('SELECT payload,updated_at::text AS revision FROM public.dashboard_shared_state WHERE storage_key=$1 LIMIT 1', [storageKey]);
+        if (rows[0]) return { value: rows[0].payload as unknown, revision: rows[0].revision as string, storageMode };
+        return { value: null, revision: null, storageMode };
       } catch { /* Try the Supabase Data API below. */ }
     }
     const client = getSupabaseAdmin();
     if (!client) throw new Error('Supabase service key is not configured.');
-    const { data, error } = await client.from('dashboard_shared_state').select('payload').eq('storage_key', storageKey).maybeSingle();
+    const { data, error } = await client.from('dashboard_shared_state').select('payload,updated_at').eq('storage_key', storageKey).maybeSingle();
     if (error) throw sharedDashboardApiError('load', error);
-    if (data) return data.payload;
-    // Supabase is the source of truth in production. Ignore per-instance
-    // SQLite snapshots there, since they may belong to a different function.
-    if (process.env.VERCEL) return null;
+    if (data) return { value: data.payload, revision: data.updated_at, storageMode };
+    return { value: null, revision: null, storageMode };
   }
-  return readLocalSharedDashboardValue(storageKey);
+  const local = readLocalSharedDashboardValue(storageKey);
+  return { value: local?.value ?? null, revision: local?.revision ?? null, storageMode };
 }
 
-export async function writeSharedDashboardValue(storageKey: string, payload: unknown): Promise<void> {
+export async function writeSharedDashboardValue(storageKey: string, payload: unknown, expectedRevision: string | null): Promise<{ storageMode: StorageMode; revision: string }> {
   const serialized = JSON.stringify(payload);
-  if (await getCompanyDataStorageMode() === 'supabase') {
+  const storageMode = await getCompanyDataStorageMode();
+  const revision = new Date().toISOString();
+  if (storageMode === 'supabase') {
     const pool = expensePool();
     if (pool && await ensureSharedDashboardTable(pool)) {
+      let result: { rows: Array<{ revision: string }> } | null = null;
       try {
-        await pool.query(`INSERT INTO public.dashboard_shared_state(storage_key,payload,updated_at) VALUES($1,$2::jsonb,now())
-          ON CONFLICT(storage_key) DO UPDATE SET payload=EXCLUDED.payload,updated_at=EXCLUDED.updated_at`, [storageKey, serialized]);
-        if (process.env.VERCEL) return;
-        db().prepare(`INSERT INTO dashboard_shared_state(storage_key,payload,updated_at) VALUES(?,?,?)
-          ON CONFLICT(storage_key) DO UPDATE SET payload=excluded.payload,updated_at=excluded.updated_at`).run(storageKey, serialized, new Date().toISOString());
-        return;
-      } catch { /* Try the Supabase Data API below. */ }
+        result = expectedRevision === null
+          ? await pool.query(`INSERT INTO public.dashboard_shared_state(storage_key,payload,updated_at) VALUES($1,$2::jsonb,$3)
+              ON CONFLICT(storage_key) DO NOTHING RETURNING updated_at::text AS revision`, [storageKey, serialized, revision])
+          : await pool.query(`UPDATE public.dashboard_shared_state SET payload=$2::jsonb,updated_at=$3 WHERE storage_key=$1 AND updated_at=$4 RETURNING updated_at::text AS revision`, [storageKey, serialized, revision, expectedRevision]);
+      } catch (error) {
+        if (error instanceof SharedDashboardConflictError) throw error;
+        /* Try the Supabase Data API below. */
+      }
+      if (result) {
+        if (!result.rows[0]) throw new SharedDashboardConflictError('Shared data changed in another session. Refresh this page and retry your edit.');
+        const savedRevision = result.rows[0].revision;
+        if (!process.env.VERCEL) {
+          try { db().prepare(`INSERT INTO dashboard_shared_state(storage_key,payload,updated_at) VALUES(?,?,?)
+            ON CONFLICT(storage_key) DO UPDATE SET payload=excluded.payload,updated_at=excluded.updated_at`).run(storageKey, serialized, savedRevision); }
+          catch { /* Supabase is already the confirmed source of truth. */ }
+        }
+        return { storageMode, revision: savedRevision };
+      }
     }
     const client = getSupabaseAdmin();
     if (!client) throw new Error('Supabase service key is not configured.');
-    const { error } = await client.from('dashboard_shared_state').upsert({ storage_key: storageKey, payload, updated_at: new Date().toISOString() }, { onConflict: 'storage_key' });
+    const query = expectedRevision === null
+      ? client.from('dashboard_shared_state').insert({ storage_key: storageKey, payload, updated_at: revision }).select('updated_at').maybeSingle()
+      : client.from('dashboard_shared_state').update({ payload, updated_at: revision }).eq('storage_key', storageKey).eq('updated_at', expectedRevision).select('updated_at').maybeSingle();
+    const { data, error } = await query;
+    if (error?.code === '23505') throw new SharedDashboardConflictError('Shared data changed in another session. Refresh this page and retry your edit.');
     if (error) throw sharedDashboardApiError('save', error);
-    if (process.env.VERCEL) return;
+    if (!data) throw new SharedDashboardConflictError('Shared data changed in another session. Refresh this page and retry your edit.');
+    const savedRevision = data.updated_at;
+    if (process.env.VERCEL) return { storageMode, revision: savedRevision };
+    try {
+      db().prepare(`INSERT INTO dashboard_shared_state(storage_key,payload,updated_at) VALUES(?,?,?)
+        ON CONFLICT(storage_key) DO UPDATE SET payload=excluded.payload,updated_at=excluded.updated_at`).run(storageKey, serialized, savedRevision);
+    } catch { /* Supabase is already the confirmed source of truth. */ }
+    return { storageMode, revision: savedRevision };
   }
-  db().prepare(`INSERT INTO dashboard_shared_state(storage_key,payload,updated_at) VALUES(?,?,?)
-    ON CONFLICT(storage_key) DO UPDATE SET payload=excluded.payload,updated_at=excluded.updated_at`).run(storageKey, serialized, new Date().toISOString());
+  const localResult = expectedRevision === null
+    ? db().prepare(`INSERT INTO dashboard_shared_state(storage_key,payload,updated_at) VALUES(?,?,?) ON CONFLICT(storage_key) DO NOTHING`).run(storageKey, serialized, revision)
+    : db().prepare(`UPDATE dashboard_shared_state SET payload=?,updated_at=? WHERE storage_key=? AND updated_at=?`).run(serialized, revision, storageKey, expectedRevision);
+  if (localResult.changes === 0) throw new SharedDashboardConflictError('Shared data changed in another session. Refresh this page and retry your edit.');
+  return { storageMode, revision };
 }
 
 

@@ -137,11 +137,12 @@ export function readVersioned<T>(key: string, validate: (value: unknown) => valu
   try {
     parsed = JSON.parse(raw);
   } catch {
-    try { storage.removeItem(key); } catch { /* A malformed entry should not interrupt dashboard use. */ }
+    // Preserve malformed data for manual recovery; never delete user storage
+    // while attempting to read it.
     return null;
   }
   if (isRecord(parsed) && parsed.version === 1 && validate(parsed.data)) return parsed.data;
-  try { storage.removeItem(key); } catch { /* An invalid entry should not interrupt dashboard use. */ }
+  // An unknown version or invalid value is left untouched for recovery.
   return null;
 }
 
