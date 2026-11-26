@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { randomUUID } from 'node:crypto';
-import { getCurrentUser, readSharedDashboardValue, readSharedDashboardValues, SharedDashboardConflictError, writeSharedDashboardValue } from '@/lib/auth';
+import { getCurrentUser, readSharedDashboardOverview, readSharedDashboardValue, readSharedDashboardValues, SharedDashboardConflictError, writeSharedDashboardValue } from '@/lib/auth';
 import { isStoredCurrencyRate, isStoredCurrencyRows, isStoredProductIncreases, isStoredSellingEntries, storageKeys } from '@/lib/storage';
 
 export const runtime = 'nodejs';
@@ -38,6 +38,18 @@ export async function GET(request: Request) {
   if (!user) { status = 401; failureCategory = 'unauthorized'; log(); return NextResponse.json({ error: 'Sign in to view shared company data.' }, { status }); }
   const params = new URL(request.url).searchParams;
   retryCount = Math.max(0, Math.min(10, Number(params.get('attempt')) || 0));
+  if (params.get('view') === 'overview') {
+    keys = [storageKeys.currencyRows, storageKeys.productIncreases, storageKeys.sellingEntries];
+    try {
+      const snapshots = await readSharedDashboardOverview(requestId);
+      return respond({ snapshots });
+    } catch (error) {
+      status = error instanceof Error && error.name === 'TimeoutError' ? 504 : 503;
+      failureCategory = status === 504 ? 'timeout' : 'storage_unavailable';
+      log();
+      return NextResponse.json({ error: error instanceof Error ? error.message : 'Unable to load shared company data.', requestId }, { status, headers: { 'x-request-id': requestId } });
+    }
+  }
   keys = params.get('keys')?.split(',').filter(Boolean) ?? [params.get('key') || ''];
   keys = Array.from(new Set(keys));
   if (!keys.length || keys.some(key => !validators[key])) { status = 400; failureCategory = 'invalid_key'; log(); return NextResponse.json({ error: 'Unknown shared data key.' }, { status }); }

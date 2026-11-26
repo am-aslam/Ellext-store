@@ -9,6 +9,7 @@ import { MobileFinanceNav } from '@/components/mobile-finance-nav';
 import { isStoredCurrencyRows, isStoredSellingEntries, storageKeys, type CurrencyRow, type SellingEntry } from '@/lib/storage';
 import { loadSharedDashboardValues, saveSharedDashboardValue } from '@/lib/shared-dashboard';
 import { shareProductWithImage } from '@/lib/product-share';
+import { fetchWithDataLoading } from '@/lib/data-fetch';
 
 const money = (value: number) => new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 2 }).format(value);
 type Draft = { amount: string; sold: string };
@@ -151,7 +152,7 @@ export default function EllextRetailersClient() {
       setNotice(error instanceof Error ? error.message : 'Could not share the product image and details.');
     }
   };
-  const signOut = async () => { await fetch('/api/auth/sign-out', { method: 'POST' }); window.location.assign('/sign-in'); };
+  const signOut = async () => { await fetchWithDataLoading('/api/auth/sign-out', { method: 'POST' }); window.location.assign('/sign-in'); };
 
   return <main className="page-shell"><div className="dashboard currency-dashboard retailers-dashboard">
     <aside className="sidebar currency-sidebar"><Link href="/" className="brand currency-brand"><BrandLogo /></Link><nav className="primary-nav" aria-label="Main navigation">

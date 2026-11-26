@@ -7,6 +7,7 @@ import { ArrowLeftRight, ChartNoAxesColumnIncreasing, Check, LayoutDashboard, Lo
 import { defaultProductCategories, isStoredCurrencyRate, isStoredCurrencyRows, isStoredExpenseLedger, isStoredProductIncreases, isStoredSellingEntries, readVersioned, storageKeys, writeVersioned, type CurrencyRow, type ExpenseLedgerEntry, type ProductIncrease, type SellingEntry } from '@/lib/storage';
 import { MobileFinanceNav } from '@/components/mobile-finance-nav';
 import { loadSharedDashboardValue } from '@/lib/shared-dashboard';
+import { fetchWithDataLoading } from '@/lib/data-fetch';
 
 const money = (value: number) => new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 }).format(value);
 const safeLegacyExpenses = (value: unknown): value is { id: string; amount: number; note: string; date: string }[] => Array.isArray(value) && value.every(item => !!item && typeof item === 'object' && typeof item.id === 'string' && Number.isFinite(item.amount) && item.amount >= 0 && typeof item.note === 'string' && typeof item.date === 'string');
@@ -40,7 +41,7 @@ export default function CompanyGrowthClient({ userName }: { userName: string }) 
       setLegacyExpenses(readVersioned(storageKeys.companyExpenses, safeLegacyExpenses) ?? []);
       setExpenses(readVersioned(storageKeys.expenseLedger, isStoredExpenseLedger) ?? []);
       try {
-        const response = await fetch('/api/expense-ledger', { cache: 'no-store' });
+        const response = await fetchWithDataLoading('/api/expense-ledger', { cache: 'no-store' });
         if (!response.ok) throw new Error('Expense service unavailable');
         const result = await response.json() as { entries?: ExpenseLedgerEntry[] };
         if (Array.isArray(result.entries) && isStoredExpenseLedger(result.entries)) {
@@ -51,7 +52,7 @@ export default function CompanyGrowthClient({ userName }: { userName: string }) 
         }
       } catch { if (active) setNotice('Could not refresh the shared expense ledger; showing saved records.'); }
       try {
-        const response = await fetch('/api/auth/status', { cache: 'no-store' });
+        const response = await fetchWithDataLoading('/api/auth/status', { cache: 'no-store' });
         if (response.ok) { const status = await response.json() as { mode?: string }; if (active) setStorageHealthy(status.mode === 'supabase'); }
       } catch { if (active) setStorageHealthy(false); }
       if (active) setReady(true);
@@ -85,7 +86,7 @@ export default function CompanyGrowthClient({ userName }: { userName: string }) 
     const retailerRows = active.filter(row => (retailById.get(row.id)?.retailerAmountInr ?? 0) > 0 || (retailById.get(row.id)?.retailerSoldCount ?? 0) > 0).map(row => ({ row, amount: retailById.get(row.id)?.retailerAmountInr ?? 0, count: retailById.get(row.id)?.retailerSoldCount ?? 0 }));
     return { soldUnits, revenue, retailerSoldUnits, retailerRevenue, retailerRows, cogs, grossProfit, operatingExpenses, ledgerExpenses, netProfit, grossMargin: revenue ? grossProfit / revenue * 100 : 0, netMargin: revenue ? netProfit / revenue * 100 : 0, stock, byCategory, months };
   }, [rows, increases, sales, expenses, legacyExpenses, rate]);
-  const signOut = async () => { await fetch('/api/auth/sign-out', { method: 'POST' }); window.location.assign('/sign-in'); };
+  const signOut = async () => { await fetchWithDataLoading('/api/auth/sign-out', { method: 'POST' }); window.location.assign('/sign-in'); };
   const maxRevenue = Math.max(...metrics.months.map(item => item.revenue), 1);
   const expenseNotes = [...expenses].sort((a, b) => Date.parse(b.date) - Date.parse(a.date));
 

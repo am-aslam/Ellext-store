@@ -6,6 +6,7 @@ import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { ArrowLeftRight, ChartNoAxesColumnIncreasing, Check, LayoutDashboard, LogOut, Percent, Plus, ReceiptText, Store, Trash2 } from 'lucide-react';
 import { isStoredExpenseLedger, readVersioned, storageKeys, writeVersioned, type ExpenseLedgerEntry } from '@/lib/storage';
 import { MobileFinanceNav } from '@/components/mobile-finance-nav';
+import { fetchWithDataLoading } from '@/lib/data-fetch';
 
 const categories = ['Shipping', 'Packaging', 'Marketing', 'Rent', 'Utilities', 'Staff', 'Other'];
 const money = (value: number) => new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 2 }).format(value);
@@ -24,7 +25,7 @@ export default function ExpenseLedgerClient({ userName }: { userName: string }) 
     const cachedIds = new Set(cached.map(entry => entry.id));
     setEntries(cached);
     setHydrated(true);
-    fetch('/api/expense-ledger', { cache: 'no-store' }).then(async response => {
+    fetchWithDataLoading('/api/expense-ledger', { cache: 'no-store' }).then(async response => {
       const result = await response.json().catch(() => ({})) as { entries?: ExpenseLedgerEntry[]; error?: string };
       if (!response.ok) throw new Error(result.error || `Expense service unavailable (${response.status}).`);
       if (Array.isArray(result.entries) && isStoredExpenseLedger(result.entries)) {
@@ -46,7 +47,7 @@ export default function ExpenseLedgerClient({ userName }: { userName: string }) 
   const total = useMemo(() => entries.reduce((sum, entry) => sum + entry.amount, 0), [entries]);
   const retryExpenseSync = async (entry: ExpenseLedgerEntry) => {
     try {
-      const response = await fetch('/api/expense-ledger', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(entry), signal: AbortSignal.timeout(5000) });
+      const response = await fetchWithDataLoading('/api/expense-ledger', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(entry), signal: AbortSignal.timeout(5000) });
       const result = await response.json().catch(() => ({})) as { entry?: ExpenseLedgerEntry; error?: string };
       if (!response.ok || !result.entry) throw new Error(result.error || 'Unable to sync this expense.');
       setEntries(current => [result.entry!, ...current.filter(item => item.id !== entry.id)]);
@@ -68,7 +69,7 @@ export default function ExpenseLedgerClient({ userName }: { userName: string }) 
     setNotice('Expense saved on this device. Syncing to shared storage…');
     setSaving(true);
     try {
-      const response = await fetch('/api/expense-ledger', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(draft), signal: AbortSignal.timeout(5000) });
+      const response = await fetchWithDataLoading('/api/expense-ledger', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(draft), signal: AbortSignal.timeout(5000) });
       const result = await response.json() as { entry?: ExpenseLedgerEntry; error?: string };
       if (!response.ok || !result.entry) throw new Error(result.error || 'Unable to save expense.');
       setEntries(current => [result.entry!, ...current.filter(entry => entry.id !== id && entry.id !== result.entry!.id)]);
@@ -87,13 +88,13 @@ export default function ExpenseLedgerClient({ userName }: { userName: string }) 
       return;
     }
     try {
-      const response = await fetch('/api/expense-ledger', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) });
+      const response = await fetchWithDataLoading('/api/expense-ledger', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) });
       const result = await response.json().catch(() => ({})) as { error?: string };
       if (!response.ok) throw new Error(result.error || `Unable to remove expense (${response.status}).`);
       setEntries(current => current.filter(entry => entry.id !== id)); setNotice('Expense removed from the ledger.');
     } catch (cause) { setNotice(cause instanceof Error ? cause.message : 'Unable to remove expense.'); }
   };
-  const signOut = async () => { await fetch('/api/auth/sign-out', { method: 'POST' }); window.location.assign('/sign-in'); };
+  const signOut = async () => { await fetchWithDataLoading('/api/auth/sign-out', { method: 'POST' }); window.location.assign('/sign-in'); };
 
   return <main className="page-shell"><div className="dashboard currency-dashboard expense-dashboard">
     <aside className="sidebar currency-sidebar"><Link href="/" className="brand currency-brand"><BrandLogo /></Link><nav className="primary-nav" aria-label="Main navigation"><Link className="nav-link" href="/"><LayoutDashboard size={19}/><span>Dashboard</span></Link><Link className="nav-link" href="/currency-exchange"><ArrowLeftRight size={19}/><span>Currency Exchange</span></Link><Link className="nav-link" href="/product-percentage"><Percent size={19}/><span>Product Percentage</span></Link><Link className="nav-link" href="/selling-details"><ChartNoAxesColumnIncreasing size={19}/><span>Selling Details</span></Link><Link className="nav-link" href="/ellext-retailers"><Store size={19}/><span>Retailers</span></Link><Link className="nav-link selected" href="/expense-ledger"><ReceiptText size={19}/><span>Expense Ledger</span></Link></nav><div className="currency-sidebar-note"><span className="currency-rate-icon"><ReceiptText size={18}/></span><span>RECORDED COSTS<br/><b>{money(total)}</b></span></div><button className="logout currency-logout" onClick={signOut}><LogOut size={17}/> Sign out</button></aside>

@@ -6,6 +6,7 @@ import { BrandLogo } from '@/components/brand-logo';
 import { ArrowLeft, Check, Copy, Database, FileSpreadsheet, FileText, LogOut, Plus, ReceiptText, ShieldCheck, X } from 'lucide-react';
 import { isStoredCurrencyRate, isStoredCurrencyRows, isStoredProductIncreases, isStoredSellingEntries, storageKeys, type CurrencyRateSnapshot, type CurrencyRow, type ProductIncrease, type SellingEntry } from '@/lib/storage';
 import { loadSharedDashboardValue } from '@/lib/shared-dashboard';
+import { fetchWithDataLoading } from '@/lib/data-fetch';
 
 type AdminAccount = { id: string; name: string; email: string; role: 'admin' };
 type AuthStatus = {
@@ -91,7 +92,7 @@ export default function SuperAdminClient({ userName }: { userName: string }) {
   const [backupError, setBackupError] = useState('');
   const [backupNotice, setBackupNotice] = useState('');
   async function refresh() {
-    const [statusResponse, adminsResponse] = await Promise.all([fetch('/api/auth/status'), fetch('/api/auth/admins/list')]);
+    const [statusResponse, adminsResponse] = await Promise.all([fetchWithDataLoading('/api/auth/status'), fetchWithDataLoading('/api/auth/admins/list')]);
     if (statusResponse.ok) setStatus(await statusResponse.json()); if (adminsResponse.ok) setAdmins((await adminsResponse.json()).admins);
   }
   useEffect(() => { void refresh(); }, []);
@@ -125,7 +126,7 @@ export default function SuperAdminClient({ userName }: { userName: string }) {
   async function createAdmin(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setError(''); setBusy(true);
     try {
-      const response = await fetch('/api/auth/admins', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name, email }) });
+      const response = await fetchWithDataLoading('/api/auth/admins', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name, email }) });
       const result = await response.json(); if (!response.ok) throw new Error(result.error || 'Unable to create Admin account.');
       setCredential({ email: result.user.email, password: result.password }); setName(''); setEmail(''); await refresh();
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'Unable to create Admin account.'); }
@@ -136,7 +137,7 @@ export default function SuperAdminClient({ userName }: { userName: string }) {
     await navigator.clipboard.writeText(`Email: ${credential.email}\nTemporary password: ${credential.password}`);
     setCopied(true); window.setTimeout(() => setCopied(false), 1800);
   }
-  async function signOut() { await fetch('/api/auth/sign-out', { method: 'POST' }); window.location.assign('/sign-in'); }
+  async function signOut() { await fetchWithDataLoading('/api/auth/sign-out', { method: 'POST' }); window.location.assign('/sign-in'); }
   async function exportExcel() {
     if (!backup?.rows.length) return;
     setExporting('excel'); setBackupError(''); setBackupNotice('');

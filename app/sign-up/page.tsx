@@ -4,19 +4,20 @@ import { FormEvent, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { BrandLogo } from '@/components/brand-logo';
 import { ArrowLeft, ArrowRight, ShieldCheck } from 'lucide-react';
+import { fetchWithDataLoading } from '@/lib/data-fetch';
 
 export default function FirstAdminSetupPage() {
   const [setupComplete, setSetupComplete] = useState<boolean | null>(null);
   const [name, setName] = useState(''); const [email, setEmail] = useState(''); const [password, setPassword] = useState(''); const [confirm, setConfirm] = useState('');
   const [error, setError] = useState(''); const [busy, setBusy] = useState(false);
-  useEffect(() => { fetch('/api/auth/status').then((response) => response.json()).then((data: { setupComplete: boolean }) => setSetupComplete(data.setupComplete)).catch(() => setSetupComplete(true)); }, []);
+  useEffect(() => { fetchWithDataLoading('/api/auth/status').then((response) => response.json()).then((data: { setupComplete: boolean }) => setSetupComplete(data.setupComplete)).catch(() => setSetupComplete(true)); }, []);
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setError('');
     if (password !== confirm) { setError('The passwords do not match.'); return; }
     if (password.length < 10) { setError('Use at least 10 characters for your password.'); return; }
     setBusy(true);
     try {
-      const response = await fetch('/api/auth/bootstrap', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name, email, password }) });
+      const response = await fetchWithDataLoading('/api/auth/bootstrap', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name, email, password }) });
       const result = await response.json(); if (!response.ok) throw new Error(result.error || 'Unable to create the Super Admin account.');
       window.location.assign('/');
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'Unable to complete setup.'); setBusy(false); }

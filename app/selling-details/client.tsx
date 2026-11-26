@@ -8,6 +8,7 @@ import { ArrowLeftRight, Check, ChartNoAxesColumnIncreasing, LayoutDashboard, Lo
 import { isStoredCurrencyRows, isStoredProductIncreases, isStoredSellingEntries, storageKeys, type CurrencyRow, type ProductIncrease, type SellingEntry } from '../../lib/storage';
 import { MobileFinanceNav } from '../../components/mobile-finance-nav';
 import { loadSharedDashboardValue, saveSharedDashboardValue } from '../../lib/shared-dashboard';
+import { fetchWithDataLoading } from '@/lib/data-fetch';
 
 const formatMoney = (amount: number) => new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 2 }).format(amount);
 const formatDate = (date: string) => new Intl.DateTimeFormat('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }).format(new Date(date));
@@ -21,7 +22,7 @@ export default function SellingDetailsPage() {
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [preview, setPreview] = useState<CurrencyRow | null>(null);
   const [notice, setNotice] = useState('');
-  const signOut = async () => { await fetch('/api/auth/sign-out', { method: 'POST' }); window.location.assign('/sign-in'); };
+  const signOut = async () => { await fetchWithDataLoading('/api/auth/sign-out', { method: 'POST' }); window.location.assign('/sign-in'); };
 
   useEffect(() => {
     let active = true;

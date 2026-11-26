@@ -1,4 +1,5 @@
-import { readVersioned, storageKeys, writeVersioned } from './storage';
+import { isStoredCurrencyRows, isStoredProductIncreases, isStoredSellingEntries, readVersioned, storageKeys, writeVersioned, type CurrencyRow, type ProductIncrease, type SellingEntry } from './storage';
+import { fetchWithDataLoading } from './data-fetch';
 
 export const sharedDashboardKeys = [
   storageKeys.currencyRows,
@@ -12,6 +13,34 @@ export type SharedDashboardKey = typeof sharedDashboardKeys[number];
 const saveQueue = new Map<SharedDashboardKey, Promise<'supabase' | 'sqlite'>>();
 const revisions = new Map<SharedDashboardKey, string | null>();
 const sharedReadQueue = new Map<string, Promise<unknown>>();
+
+export type DashboardOverview = { rows: CurrencyRow[]; increases: ProductIncrease[]; sales: SellingEntry[] };
+
+/** Load a compact dashboard-only projection. Full product images remain in the shared snapshot. */
+export async function loadDashboardOverview(signal?: AbortSignal): Promise<DashboardOverview> {
+  const response = await fetchWithDataLoading('/api/shared-dashboard?view=overview', { cache: 'no-store', signal });
+  const result = await response.json().catch(() => ({})) as {
+    snapshots?: Record<string, { value?: unknown; revision?: string | null }>;
+    error?: string;
+    requestId?: string;
+  };
+  if (!response.ok || !result.snapshots) {
+    const requestId = response.headers.get('x-request-id') || result.requestId;
+    throw new Error(`${result.error || 'Shared company data is unavailable.'}${requestId ? ` (request ${requestId})` : ''}`);
+  }
+  const compactRows = result.snapshots[storageKeys.currencyRows]?.value;
+  // This read intentionally excludes image blobs; provide the typed field the
+  // dashboard expects without changing the real snapshot or browser cache.
+  const rowSnapshot = Array.isArray(compactRows)
+    ? compactRows.map(row => typeof row === 'object' && row !== null && !Array.isArray(row) ? { ...row, image: '' } : row)
+    : compactRows;
+  const increaseSnapshot = result.snapshots[storageKeys.productIncreases]?.value;
+  const salesSnapshot = result.snapshots[storageKeys.sellingEntries]?.value;
+  if (!isStoredCurrencyRows(rowSnapshot) || !isStoredProductIncreases(increaseSnapshot) || !isStoredSellingEntries(salesSnapshot)) {
+    throw new Error('Shared dashboard data failed validation.');
+  }
+  return { rows: rowSnapshot, increases: increaseSnapshot, sales: salesSnapshot };
+}
 
 function preserveForRecovery(key: SharedDashboardKey, value: unknown) {
   // Keep a dated, non-overwriting recovery copy. Never promote browser data
@@ -35,7 +64,7 @@ async function fetchSharedDashboardValue<T>(
   const cached = readVersioned(key, validate);
   let response: Response;
   try {
-    response = await fetch(`/api/shared-dashboard?key=${encodeURIComponent(key)}`, { cache: 'no-store', signal });
+    response = await fetchWithDataLoading(`/api/shared-dashboard?key=${encodeURIComponent(key)}`, { cache: 'no-store', signal });
   } catch (error) {
     if (cached !== null) preserveForRecovery(key, cached);
     throw error;
@@ -93,7 +122,7 @@ export async function loadSharedDashboardValues(
   const request = (async () => {
     let response: Response;
     try {
-      response = await fetch(`/api/shared-dashboard?keys=${keys.map(encodeURIComponent).join(',')}&attempt=${retryCount}`, { cache: 'no-store', signal });
+      response = await fetchWithDataLoading(`/api/shared-dashboard?keys=${keys.map(encodeURIComponent).join(',')}&attempt=${retryCount}`, { cache: 'no-store', signal });
     } catch (error) {
       for (const key of keys) { const validate = validators[key]; if (validate) { const cached = readVersioned(key, validate); if (cached !== null) preserveForRecovery(key, cached); } }
       throw error;
@@ -140,7 +169,7 @@ export function saveSharedDashboardValue(key: SharedDashboardKey, value: unknown
   const previous = saveQueue.get(key) ?? Promise.resolve<'supabase' | 'sqlite'>('supabase');
   const next = previous.catch(() => {}).then(async () => {
     try {
-      const response = await fetch('/api/shared-dashboard', {
+      const response = await fetchWithDataLoading('/api/shared-dashboard', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ key, value, revision: revisions.get(key) ?? null }),

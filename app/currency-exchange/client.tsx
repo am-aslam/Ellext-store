@@ -8,6 +8,7 @@ import { ArrowLeftRight, Archive, ChartNoAxesColumnIncreasing, Check, LayoutDash
 import { defaultProductCategories, isStoredCurrencyRate, isStoredCurrencyRows, isStoredSellingEntries, storageKeys, type CurrencyRateSnapshot, type CurrencyRow } from '../../lib/storage';
 import { MobileFinanceNav } from '../../components/mobile-finance-nav';
 import { loadSharedDashboardValue, saveSharedDashboardValue } from '../../lib/shared-dashboard';
+import { fetchWithDataLoading } from '@/lib/data-fetch';
 
 type ExchangeApiResponse = { result?: string; base_code?: string; rates?: { INR?: number }; time_last_update_utc?: string };
 
@@ -68,7 +69,7 @@ export default function CurrencyExchangePage() {
     const controller = new AbortController();
     const timeout = window.setTimeout(() => controller.abort(), 4000);
     try {
-      const response = await fetch('/api/exchange-rate', { cache: 'no-store', signal: controller.signal });
+      const response = await fetchWithDataLoading('/api/exchange-rate', { cache: 'no-store', signal: controller.signal });
       if (!response.ok) throw new Error(`Exchange rate request failed: ${response.status}`);
       const data = await response.json() as ExchangeApiResponse;
       if (data.result !== 'success' || data.base_code !== 'USD' || !data.rates?.INR || !Number.isFinite(data.rates.INR)) throw new Error('Exchange rate response was invalid');
@@ -154,7 +155,7 @@ export default function CurrencyExchangePage() {
   const deleteRow = async (id: string) => { const nextRows = rows.filter(row => row.id !== id); try { const mode = await saveSharedDashboardValue(storageKeys.currencyRows, nextRows); setRows(nextRows); setNotice(mode === 'sqlite' ? 'Deleted locally only; Supabase is unavailable, so the change is not shared.' : 'Exchange row deleted'); } catch (cause) { setNotice(cause instanceof Error ? cause.message : 'Could not delete the exchange row.'); } };
   const archiveRow = async (id: string) => { const nextRows = rows.map(row => row.id === id ? { ...row, active: !row.active } : row); try { const mode = await saveSharedDashboardValue(storageKeys.currencyRows, nextRows); setRows(nextRows); setNotice(mode === 'sqlite' ? 'Updated locally only; Supabase is unavailable, so the change is not shared.' : showArchived ? 'Exchange row restored' : 'Exchange row archived'); } catch (cause) { setNotice(cause instanceof Error ? cause.message : 'Could not update the exchange row.'); } };
   const addCategory = async () => { const next = newCategory.trim(); if (!next) return; if (categories.some(item => item.toLowerCase() === next.toLowerCase())) { setError('That category already exists.'); return; } const nextCategories = [...categories, next]; try { const mode = await saveSharedDashboardValue(storageKeys.productCategories, nextCategories.filter(item => !defaultProductCategories.includes(item))); setCategories(nextCategories); setCategory(next); setNewCategory(''); setCategoryModalOpen(false); setNotice(mode === 'sqlite' ? `Category saved locally only: ${next}` : `Category added: ${next}`); } catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not save the category.'); } };
-  const signOut = async () => { await fetch('/api/auth/sign-out', { method: 'POST' }); window.location.assign('/sign-in'); };
+  const signOut = async () => { await fetchWithDataLoading('/api/auth/sign-out', { method: 'POST' }); window.location.assign('/sign-in'); };
 
   return <main className="page-shell">
     <div className="dashboard currency-dashboard">

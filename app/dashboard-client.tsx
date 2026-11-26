@@ -1,12 +1,12 @@
 'use client';
 
-import Image from 'next/image';
 import Link from 'next/link';
 import { BrandLogo } from '@/components/brand-logo';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { ArrowLeftRight, ChartNoAxesColumnIncreasing, LayoutDashboard, LogOut, Menu, Percent, ReceiptText, ShieldCheck, ShoppingBag, Store, TrendingUp, X } from 'lucide-react';
 import { isStoredCurrencyRows, isStoredProductIncreases, isStoredSellingEntries, readVersioned, storageKeys, type CurrencyRow, type ProductIncrease, type SellingEntry } from '../lib/storage';
-import { loadSharedDashboardValue } from '../lib/shared-dashboard';
+import { loadDashboardOverview } from '../lib/shared-dashboard';
+import { fetchWithDataLoading } from '@/lib/data-fetch';
 
 type DashboardSale = {
   row: CurrencyRow;
@@ -42,7 +42,7 @@ function buildDashboardData(allRows: CurrencyRow[], increases: ProductIncrease[]
 }
 
 function DashboardSidebar({ open, onClose, data, isSuperAdmin }: { open: boolean; onClose: () => void; data: DashboardData; isSuperAdmin: boolean }) {
-  const signOut = async () => { await fetch('/api/auth/sign-out', { method: 'POST' }); window.location.assign('/sign-in'); };
+  const signOut = async () => { await fetchWithDataLoading('/api/auth/sign-out', { method: 'POST' }); window.location.assign('/sign-in'); };
   return <>
     {open && <button className="drawer-scrim" aria-label="Close navigation" onClick={onClose} />}
     <aside className={`sidebar dashboard-sidebar ${open ? 'sidebar-open' : ''}`}>
@@ -69,16 +69,21 @@ export default function Dashboard({ isSuperAdmin }: { isSuperAdmin: boolean }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [syncWarning, setSyncWarning] = useState('');
   const reload = useCallback(async () => {
+    let rows: CurrencyRow[];
+    let increases: ProductIncrease[];
+    let sales: SellingEntry[];
     let sharedReadError = '';
-    const load = async <T,>(key: typeof storageKeys.currencyRows | typeof storageKeys.productIncreases | typeof storageKeys.sellingEntries, validate: (value: unknown) => value is T, fallback: T): Promise<T> => {
-      try { return await loadSharedDashboardValue(key, validate) ?? fallback; }
-      catch (cause) { sharedReadError ||= cause instanceof Error ? cause.message : 'Shared data request failed.'; return readVersioned(key, validate) ?? fallback; }
-    };
-    const [rows, increases, sales] = await Promise.all([
-      load(storageKeys.currencyRows, isStoredCurrencyRows, [] as CurrencyRow[]),
-      load(storageKeys.productIncreases, isStoredProductIncreases, [] as ProductIncrease[]),
-      load(storageKeys.sellingEntries, isStoredSellingEntries, [] as SellingEntry[]),
-    ]);
+    try {
+      const overview = await loadDashboardOverview();
+      rows = overview.rows;
+      increases = overview.increases;
+      sales = overview.sales;
+    } catch (cause) {
+      sharedReadError = cause instanceof Error ? cause.message : 'Shared data request failed.';
+      rows = readVersioned(storageKeys.currencyRows, isStoredCurrencyRows) ?? [];
+      increases = readVersioned(storageKeys.productIncreases, isStoredProductIncreases) ?? [];
+      sales = readVersioned(storageKeys.sellingEntries, isStoredSellingEntries) ?? [];
+    }
     setData(buildDashboardData(rows, increases, sales));
     setSyncWarning(sharedReadError ? `${sharedReadError} Showing this browser’s cached data only; unsynced changes are not visible to other accounts.` : '');
   }, []);
@@ -132,7 +137,7 @@ export default function Dashboard({ isSuperAdmin }: { isSuperAdmin: boolean }) {
           </div>
           <aside className="dashboard-log-card" aria-labelledby="dashboard-log-title">
             <div className="dashboard-log-heading"><div><span className="dashboard-log-icon"><ChartNoAxesColumnIncreasing size={15} /></span><div><h2 id="dashboard-log-title">Recent sales log</h2><p>Latest saved sales entries</p></div></div><Link href="/selling-details" aria-label="Open all selling details">See all <span aria-hidden>→</span></Link></div>
-            {salesLogs.length ? <div className="dashboard-log-list">{salesLogs.map(item => <article className="dashboard-log-item" key={item.row.id}><span className="dashboard-log-image"><Image src={item.row.image} alt="" fill sizes="38px" unoptimized /></span><div className="dashboard-log-copy"><b title={item.row.description}>{item.row.description}</b><small>{formatDate(item.updatedAt)} · {item.sold.toLocaleString('en-IN')} sold</small></div><strong>{item.collected === null ? '—' : formatInr(item.collected)}</strong></article>)}</div> : <div className="dashboard-log-empty"><span className="dashboard-empty-icon"><ChartNoAxesColumnIncreasing size={18} /></span><b>No sales log yet</b><p>Saved sold counts will show here.</p><Link href="/selling-details">Record sales</Link></div>}
+            {salesLogs.length ? <div className="dashboard-log-list">{salesLogs.map(item => <article className="dashboard-log-item" key={item.row.id}><span className="dashboard-log-image" aria-hidden><ShoppingBag size={16} /></span><div className="dashboard-log-copy"><b title={item.row.description}>{item.row.description}</b><small>{formatDate(item.updatedAt)} · {item.sold.toLocaleString('en-IN')} sold</small></div><strong>{item.collected === null ? '—' : formatInr(item.collected)}</strong></article>)}</div> : <div className="dashboard-log-empty"><span className="dashboard-empty-icon"><ChartNoAxesColumnIncreasing size={18} /></span><b>No sales log yet</b><p>Saved sold counts will show here.</p><Link href="/selling-details">Record sales</Link></div>}
           </aside>
         </section>
       </section>

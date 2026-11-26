@@ -4,6 +4,7 @@ import { FormEvent, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { BrandLogo } from '@/components/brand-logo';
 import { ArrowRight, ShieldCheck } from 'lucide-react';
+import { fetchWithDataLoading } from '@/lib/data-fetch';
 
 type AuthStatus = { setupComplete: boolean; mode: 'supabase' | 'sqlite'; supabaseConfigured: boolean };
 export default function SignInPage() {
@@ -13,12 +14,12 @@ export default function SignInPage() {
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
 
-  useEffect(() => { fetch('/api/auth/status').then((response) => response.json()).then(setStatus).catch(() => setStatus({ setupComplete: true, mode: 'sqlite', supabaseConfigured: false })); }, []);
+  useEffect(() => { fetchWithDataLoading('/api/auth/status').then((response) => response.json()).then(setStatus).catch(() => setStatus({ setupComplete: true, mode: 'sqlite', supabaseConfigured: false })); }, []);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setError(''); setBusy(true);
     try {
-      const response = await fetch('/api/auth/sign-in', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email, password }) });
+      const response = await fetchWithDataLoading('/api/auth/sign-in', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email, password }) });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || 'Unable to sign in.');
       const requestedPath = new URL(window.location.href).searchParams.get('next');

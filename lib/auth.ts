@@ -9,6 +9,7 @@ import { mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { cookies } from 'next/headers';
+import { storageKeys } from '@/lib/storage';
 
 export type UserRole = 'super_admin' | 'admin';
 export type AppUser = { id: string; email: string; name: string; role: UserRole };
@@ -398,6 +399,43 @@ export async function readSharedDashboardValue(storageKey: string, requestId?: s
   return (await readSharedDashboardValues([storageKey], requestId))[storageKey];
 }
 
+/**
+ * Read the compact dashboard summary directly from Postgres. The currency
+ * snapshot can contain multi-megabyte base64 images; the dashboard charts and
+ * logs only need product metadata, so omit those fields from this response.
+ * This is read-only and intentionally does not replace or cache the snapshots.
+ */
+export async function readSharedDashboardOverview(requestId?: string): Promise<Record<string, SharedDashboardSnapshot>> {
+  const storageMode = await getCompanyDataStorageMode();
+  if (storageMode !== 'supabase') throw new Error('Supabase shared storage is not configured.');
+  const pool = expensePool();
+  if (!pool) throw new Error('Supabase PostgreSQL connection is not configured.');
+
+  const startedAt = performance.now();
+  const { rows } = await pool.query(`
+    SELECT storage_key,
+      CASE WHEN storage_key = 'ellextstore:v1:currency-rows' THEN (
+        SELECT COALESCE(jsonb_agg(item - 'image'), '[]'::jsonb)
+        FROM jsonb_array_elements(payload) AS item
+      ) ELSE payload END AS payload,
+      updated_at
+    FROM public.dashboard_shared_state
+    WHERE storage_key IN (
+      'ellextstore:v1:currency-rows',
+      'ellextstore:v1:product-increases',
+      'ellextstore:v1:selling-entries'
+    )`);
+  const records = new Map(rows.map((row: { storage_key: string; payload: unknown; updated_at: Date | string }) => [row.storage_key, row]));
+  const keys = [storageKeys.currencyRows, storageKeys.productIncreases, storageKeys.sellingEntries];
+  const snapshots = Object.fromEntries(keys.map(key => {
+    const row = records.get(key);
+    return [key, { value: row?.payload ?? null, revision: row?.updated_at ? new Date(row.updated_at).toISOString() : null, storageMode }];
+  }));
+  const bytes = Buffer.byteLength(JSON.stringify(snapshots));
+  console.info(JSON.stringify({ event: 'shared_dashboard_overview_query', requestId: requestId ?? null, provider: 'supabase-postgres', durationMs: Math.round(performance.now() - startedAt), responseBytes: bytes, rowCount: rows.length, status: 'ok' }));
+  return snapshots;
+}
+
 export async function writeSharedDashboardValue(storageKey: string, payload: unknown, expectedRevision: string | null): Promise<{ storageMode: StorageMode; revision: string }> {
   const serialized = JSON.stringify(payload);
   const storageMode = await getCompanyDataStorageMode();
@@ -430,7 +468,7 @@ function expensePool(): Pool | null {
   if (!globalForDb.ellextExpensePool) {
     const databaseHost = new URL(connectionString).hostname;
     const ssl = ['localhost', '127.0.0.1', '::1'].includes(databaseHost) ? false : { rejectUnauthorized: false };
-    globalForDb.ellextExpensePool = new Pool({ connectionString, ssl, max: 2, connectionTimeoutMillis: 1000, query_timeout: 2000 });
+    globalForDb.ellextExpensePool = new Pool({ connectionString, ssl, max: 2, connectionTimeoutMillis: 3500, query_timeout: 4000 });
   }
   return globalForDb.ellextExpensePool;
 }
