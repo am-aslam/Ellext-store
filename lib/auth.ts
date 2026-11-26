@@ -409,22 +409,44 @@ export async function readSharedDashboardOverview(requestId?: string): Promise<R
   const storageMode = await getCompanyDataStorageMode();
   if (storageMode !== 'supabase') throw new Error('Supabase shared storage is not configured.');
   const pool = expensePool();
-  if (!pool) throw new Error('Supabase PostgreSQL connection is not configured.');
+  if (!pool) {
+    const startedAt = performance.now();
+    const snapshots = await readSharedDashboardValues([storageKeys.currencyRows, storageKeys.productIncreases, storageKeys.sellingEntries], requestId);
+    console.info(JSON.stringify({ event: 'shared_dashboard_overview_query', requestId: requestId ?? null, provider: 'supabase-rest-fallback', status: 'ok', reason: 'postgres_not_configured', durationMs: Math.round(performance.now() - startedAt) }));
+    return snapshots;
+  }
 
   const startedAt = performance.now();
-  const { rows } = await pool.query(`
-    SELECT storage_key,
-      CASE WHEN storage_key = 'ellextstore:v1:currency-rows' THEN (
-        SELECT COALESCE(jsonb_agg(item - 'image'), '[]'::jsonb)
-        FROM jsonb_array_elements(payload) AS item
-      ) ELSE payload END AS payload,
-      updated_at
-    FROM public.dashboard_shared_state
-    WHERE storage_key IN (
-      'ellextstore:v1:currency-rows',
-      'ellextstore:v1:product-increases',
-      'ellextstore:v1:selling-entries'
-    )`);
+  let rows: Array<{ storage_key: string; payload: unknown; updated_at: Date | string }>;
+  try {
+    const result = await pool.query(`
+      SELECT storage_key,
+        CASE WHEN storage_key = 'ellextstore:v1:currency-rows' THEN (
+          SELECT COALESCE(jsonb_agg(item - 'image'), '[]'::jsonb)
+          FROM jsonb_array_elements(payload) AS item
+        ) ELSE payload END AS payload,
+        updated_at
+      FROM public.dashboard_shared_state
+      WHERE storage_key IN (
+        'ellextstore:v1:currency-rows',
+        'ellextstore:v1:product-increases',
+        'ellextstore:v1:selling-entries'
+      )`);
+    rows = result.rows;
+  } catch (postgresError) {
+    console.warn(JSON.stringify({ event: 'shared_dashboard_overview_query', requestId: requestId ?? null, provider: 'supabase-postgres', status: 'error', category: safeConnectionError(postgresError), durationMs: Math.round(performance.now() - startedAt) }));
+    // The Data API remains a valid shared-data path when the pooler is
+    // temporarily unreachable. It may transfer image blobs, but avoids
+    // incorrectly showing browser-only data while Supabase REST is available.
+    try {
+      const snapshots = await readSharedDashboardValues([storageKeys.currencyRows, storageKeys.productIncreases, storageKeys.sellingEntries], requestId);
+      console.info(JSON.stringify({ event: 'shared_dashboard_overview_query', requestId: requestId ?? null, provider: 'supabase-rest-fallback', status: 'ok', durationMs: Math.round(performance.now() - startedAt) }));
+      return snapshots;
+    } catch (restError) {
+      console.error(JSON.stringify({ event: 'shared_dashboard_overview_query', requestId: requestId ?? null, provider: 'supabase-rest-fallback', status: 'error', category: safeConnectionError(restError), durationMs: Math.round(performance.now() - startedAt) }));
+      throw new Error(`Supabase PostgreSQL connection failed (${safeConnectionError(postgresError)}), and the Supabase REST fallback failed (${safeConnectionError(restError)}).`);
+    }
+  }
   const records = new Map(rows.map((row: { storage_key: string; payload: unknown; updated_at: Date | string }) => [row.storage_key, row]));
   const keys = [storageKeys.currencyRows, storageKeys.productIncreases, storageKeys.sellingEntries];
   const snapshots = Object.fromEntries(keys.map(key => {
