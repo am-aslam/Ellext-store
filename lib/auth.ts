@@ -9,7 +9,7 @@ import { mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { cookies } from 'next/headers';
-import { storageKeys } from '@/lib/storage';
+import { isStoredCurrencyRows, isStoredProductIncreases, isStoredSellingEntries, storageKeys, type CurrencyRow, type ProductIncrease, type SellingEntry } from '@/lib/storage';
 
 export type UserRole = 'super_admin' | 'admin';
 export type AppUser = { id: string; email: string; name: string; role: UserRole };
@@ -387,7 +387,8 @@ export async function readSharedDashboardValues(requestKeys: string[], requestId
         const row = records.get(key);
         return [key, { value: row?.payload ?? null, revision: row?.updated_at ?? null, storageMode }];
       }));
-      console.info(JSON.stringify({ event: 'shared_dashboard_query', requestId: requestId ?? null, provider: 'supabase-rest', durationMs: Math.round(performance.now() - startedAt), status: 'ok', keyCount: requestKeys.length }));
+      const snapshotsMetrics = (data ?? []).map(row => ({ key: row.storage_key, snapshotBytes: Buffer.byteLength(JSON.stringify(row.payload)), recordCount: Array.isArray(row.payload) ? row.payload.length : null }));
+      console.info(JSON.stringify({ event: 'shared_dashboard_query', requestId: requestId ?? null, provider: 'supabase-rest', durationMs: Math.round(performance.now() - startedAt), status: 'ok', keyCount: requestKeys.length, snapshotsMetrics }));
       return snapshots;
     } catch (error) {
       const category = error instanceof Error && error.name === 'TimeoutError' ? 'timeout' : error instanceof Error && 'code' in error && (error as Error & {code?:string}).code === 'ENOTFOUND' ? 'dns' : 'request_failed';
@@ -423,10 +424,12 @@ export async function readSharedDashboardOverview(requestId?: string): Promise<R
   }
 
   const startedAt = performance.now();
-  let rows: Array<{ storage_key: string; payload: unknown; updated_at: Date | string }>;
+  let rows: Array<{ storage_key: string; payload: unknown; updated_at: Date | string; stored_jsonb_bytes: number; record_count: number | null }>;
   try {
     const result = await pool.query(`
       SELECT storage_key,
+        pg_column_size(payload) AS stored_jsonb_bytes,
+        CASE WHEN jsonb_typeof(payload) = 'array' THEN jsonb_array_length(payload) ELSE NULL END AS record_count,
         CASE WHEN storage_key = 'ellextstore:v1:currency-rows' THEN (
           SELECT COALESCE(jsonb_agg(item - 'image'), '[]'::jsonb)
           FROM jsonb_array_elements(payload) AS item
@@ -453,14 +456,14 @@ export async function readSharedDashboardOverview(requestId?: string): Promise<R
       throw new Error(`Supabase PostgreSQL connection failed (${safeConnectionError(postgresError)}), and the Supabase REST fallback failed (${safeConnectionError(restError)}).`);
     }
   }
-  const records = new Map(rows.map((row: { storage_key: string; payload: unknown; updated_at: Date | string }) => [row.storage_key, row]));
+  const records = new Map(rows.map((row) => [row.storage_key, row]));
   const keys = [storageKeys.currencyRows, storageKeys.productIncreases, storageKeys.sellingEntries];
   const snapshots = Object.fromEntries(keys.map(key => {
     const row = records.get(key);
     return [key, { value: row?.payload ?? null, revision: row?.updated_at ? new Date(row.updated_at).toISOString() : null, storageMode }];
   }));
   const bytes = Buffer.byteLength(JSON.stringify(snapshots));
-  console.info(JSON.stringify({ event: 'shared_dashboard_overview_query', requestId: requestId ?? null, provider: 'supabase-postgres', durationMs: Math.round(performance.now() - startedAt), responseBytes: bytes, rowCount: rows.length, status: 'ok' }));
+  console.info(JSON.stringify({ event: 'shared_dashboard_overview_query', requestId: requestId ?? null, provider: 'supabase-postgres', durationMs: Math.round(performance.now() - startedAt), jsonbProjection: 'currency-images-omitted', responseBytes: bytes, snapshotMetrics: rows.map(row => ({ key: row.storage_key, storedJsonbBytes: row.stored_jsonb_bytes, recordCount: row.record_count })), status: 'ok' }));
   return snapshots;
 }
 
@@ -482,7 +485,7 @@ export async function writeSharedDashboardValue(storageKey: string, payload: unk
       if (error) throw sharedDashboardApiError('save', error);
       if (!data) throw new SharedDashboardConflictError('Shared data changed in another session. Refresh this page and retry your edit.');
       const savedRevision = data.updated_at;
-      console.info(JSON.stringify({ event: 'shared_dashboard_write', requestId: requestId ?? null, provider: 'supabase-rest', key: storageKey, operation, expectedRevision, revision: savedRevision, payloadBytes: Buffer.byteLength(serialized), durationMs: Math.round(performance.now() - startedAt), status: 'committed' }));
+      console.info(JSON.stringify({ event: 'shared_dashboard_write', requestId: requestId ?? null, provider: 'supabase-rest', key: storageKey, operation, expectedRevision, revision: savedRevision, payloadBytes: Buffer.byteLength(serialized), recordCount: Array.isArray(payload) ? payload.length : null, durationMs: Math.round(performance.now() - startedAt), status: 'committed' }));
       return { storageMode, revision: savedRevision };
     } catch (error) {
       // A timed-out HTTP response does not prove that PostgREST rolled back.
@@ -515,6 +518,102 @@ export async function writeSharedDashboardValue(storageKey: string, payload: unk
     : db().prepare(`UPDATE dashboard_shared_state SET payload=?,updated_at=? WHERE storage_key=? AND updated_at=?`).run(serialized, revision, storageKey, expectedRevision);
   if (localResult.changes === 0) throw new SharedDashboardConflictError('Shared data changed in another session. Refresh this page and retry your edit.');
   return { storageMode, revision };
+}
+
+type SharedRowKey = typeof storageKeys.currencyRows | typeof storageKeys.productIncreases | typeof storageKeys.sellingEntries;
+type SharedRow = CurrencyRow | ProductIncrease | SellingEntry;
+type SharedRowOperation = 'upsert' | 'delete';
+const sharedRowValidators: Record<SharedRowKey, (value: unknown) => boolean> = {
+  [storageKeys.currencyRows]: value => isStoredCurrencyRows([value]),
+  [storageKeys.productIncreases]: value => isStoredProductIncreases([value]),
+  [storageKeys.sellingEntries]: value => isStoredSellingEntries([value]),
+};
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record).sort().map(key => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+function rowIdentity(key: SharedRowKey, value: unknown): string | null {
+  if (!value || typeof value !== 'object') return null;
+  const record = value as Record<string, unknown>;
+  const identity = key === storageKeys.currencyRows ? record.id : record.sourceId;
+  return typeof identity === 'string' ? identity : null;
+}
+
+/** Apply one authenticated, validated row delta with snapshot and row-level CAS. */
+export async function mutateSharedDashboardRow(input: {
+  key: SharedRowKey;
+  operation: SharedRowOperation;
+  id: string;
+  row?: unknown;
+  baseRow: unknown | null;
+  baseImageDigest?: string | null;
+  expectedRevision: string | null;
+  requestId?: string;
+}): Promise<{ storageMode: StorageMode; revision: string; merged: boolean }> {
+  const { key, operation, id, row, baseRow, expectedRevision, requestId } = input;
+  if (!id.trim()) throw new Error('A row identifier is required.');
+  if (operation === 'upsert' && (!row || rowIdentity(key, row) !== id)) {
+    throw new Error('The row did not pass validation.');
+  }
+  const startedAt = performance.now();
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const current = await readSharedDashboardValue(key, requestId);
+    const records = current.value ?? [];
+    if (!sharedRowValidators[key](records)) throw new Error('The shared snapshot failed validation. No rows were changed.');
+    const currentRows = records as SharedRow[];
+    const matches = currentRows.filter(item => rowIdentity(key, item) === id);
+    if (matches.length > 1) throw new Error('The shared snapshot contains duplicate row identifiers. No rows were changed.');
+    const existing = matches[0];
+    let candidateRow: SharedRow | null = null;
+    if (operation === 'upsert') {
+      if (key === storageKeys.currencyRows && row && typeof row === 'object' && !Array.isArray(row) && !Object.hasOwn(row, 'image')) {
+        if (!existing) throw new Error('A new currency row must include its product image.');
+        candidateRow = { ...existing, ...(row as Record<string, unknown>), image: (existing as CurrencyRow).image } as CurrencyRow;
+      } else {
+        candidateRow = row as SharedRow;
+      }
+      if (!sharedRowValidators[key](candidateRow)) throw new Error('The row did not pass validation.');
+    }
+
+    if (operation === 'upsert' && existing && canonicalJson(existing) === canonicalJson(candidateRow)) {
+      if (!current.revision) throw new Error('The saved row has no valid shared revision. Refresh before retrying.');
+      console.info(JSON.stringify({ event: 'shared_dashboard_row_write', requestId: requestId ?? null, key, operation, payloadBytes: Buffer.byteLength(JSON.stringify({ key, operation, id, row, expectedRevision })), durationMs: Math.round(performance.now() - startedAt), attempts: attempt + 1, status: 'already_committed', revision: current.revision }));
+      return { storageMode: current.storageMode, revision: current.revision, merged: current.revision !== expectedRevision };
+    }
+    if (operation === 'delete' && !existing) {
+      if (!current.revision) throw new Error('The shared row is unavailable. Refresh before retrying.');
+      return { storageMode: current.storageMode, revision: current.revision, merged: current.revision !== expectedRevision };
+    }
+
+    let baseMatches = baseRow === null ? !existing : Boolean(existing && canonicalJson(existing) === canonicalJson(baseRow));
+    if (key === storageKeys.currencyRows && existing && baseRow && input.baseImageDigest) {
+      const { image: _image, ...currentWithoutImage } = existing as CurrencyRow;
+      baseMatches = canonicalJson(currentWithoutImage) === canonicalJson(baseRow)
+        && createHash('sha256').update((existing as CurrencyRow).image).digest('hex') === input.baseImageDigest;
+    }
+    if (!baseMatches) throw new SharedDashboardConflictError('This product row changed in another session. The newer shared row was kept; refresh before retrying your saved draft.');
+
+    const nextRows = operation === 'delete'
+      ? currentRows.filter(item => rowIdentity(key, item) !== id)
+      : existing
+        ? currentRows.map(item => rowIdentity(key, item) === id ? candidateRow! : item)
+        : [...currentRows, candidateRow!];
+    if (!sharedRowValidators[key](nextRows)) throw new Error('The updated shared snapshot failed validation. No rows were changed.');
+    try {
+      const saved = await writeSharedDashboardValue(key, nextRows, current.revision, requestId);
+      const merged = current.revision !== expectedRevision;
+      console.info(JSON.stringify({ event: 'shared_dashboard_row_write', requestId: requestId ?? null, key, operation, payloadBytes: Buffer.byteLength(JSON.stringify({ key, operation, id, row, expectedRevision })), snapshotBytes: Buffer.byteLength(JSON.stringify(nextRows)), recordCount: nextRows.length, durationMs: Math.round(performance.now() - startedAt), attempts: attempt + 1, status: 'committed', merged, revision: saved.revision }));
+      return { ...saved, merged };
+    } catch (error) {
+      if (!(error instanceof SharedDashboardConflictError) || attempt === 2) throw error;
+    }
+  }
+  throw new SharedDashboardConflictError('Shared data changed repeatedly while saving. Your draft is preserved; refresh before retrying.');
 }
 
 

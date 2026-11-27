@@ -7,7 +7,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { ArrowLeftRight, Check, ChartNoAxesColumnIncreasing, LayoutDashboard, LockKeyhole, LogOut, Percent, Plus, ReceiptText, Store, UnlockKeyhole, X } from 'lucide-react';
 import { isStoredCurrencyRows, isStoredProductIncreases, isStoredSellingEntries, storageKeys, type CurrencyRow, type ProductIncrease, type SellingEntry } from '../../lib/storage';
 import { MobileFinanceNav } from '../../components/mobile-finance-nav';
-import { loadSharedDashboardValue, saveSharedDashboardValue } from '../../lib/shared-dashboard';
+import { loadSharedDashboardValue, saveSharedDashboardRow } from '../../lib/shared-dashboard';
 import { fetchWithDataLoading } from '@/lib/data-fetch';
 
 const formatMoney = (amount: number) => new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 2 }).format(amount);
@@ -67,10 +67,9 @@ export default function SellingDetailsPage() {
       return;
     }
     const entry: SellingEntry = { ...entryMap.get(row.id), sourceId: row.id, soldCount, updatedAt: new Date().toISOString() };
-    const nextEntries = [...entries.filter(item => item.sourceId !== row.id), entry];
     try {
-      const storageMode = await saveSharedDashboardValue(storageKeys.sellingEntries, nextEntries);
-      setEntries(nextEntries);
+      const storageMode = await saveSharedDashboardRow(storageKeys.sellingEntries, entry, entryMap.get(row.id) ?? null);
+      setEntries(current => [...current.filter(item => item.sourceId !== row.id), entry]);
       setEditingIds(current => current.filter(id => id !== row.id));
       setErrors(current => ({ ...current, [row.id]: '' }));
       setNotice(storageMode === 'sqlite' ? `Saved locally only for ${row.description}; Supabase is unavailable, so other accounts will not see this update yet.` : `Sales updated for ${row.description}`);

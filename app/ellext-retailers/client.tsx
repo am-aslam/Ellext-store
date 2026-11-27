@@ -7,7 +7,7 @@ import { ArrowLeftRight, ChartNoAxesColumnIncreasing, Check, Image as ImageIcon,
 import { BrandLogo } from '@/components/brand-logo';
 import { MobileFinanceNav } from '@/components/mobile-finance-nav';
 import { isStoredCurrencyRows, isStoredSellingEntries, storageKeys, type CurrencyRow, type SellingEntry } from '@/lib/storage';
-import { loadSharedDashboardValues, saveSharedDashboardValue } from '@/lib/shared-dashboard';
+import { loadSharedDashboardValues, saveSharedDashboardRow } from '@/lib/shared-dashboard';
 import { shareProductWithImage } from '@/lib/product-share';
 import { fetchWithDataLoading } from '@/lib/data-fetch';
 
@@ -83,12 +83,11 @@ export default function EllextRetailersClient() {
     }
     const now = new Date().toISOString();
     const updated: SellingEntry = { ...previous, sourceId: row.id, soldCount: directSold, ...(field === 'amount' ? { retailerAmountInr: amount } : { retailerSoldCount: soldCount }), retailerUpdatedAt: now, updatedAt: previous?.updatedAt ?? now };
-    const next = [...entries.filter(entry => entry.sourceId !== row.id), updated];
     const saveKey = `${row.id}:${field}`;
     setSavingId(saveKey);
     try {
-      const mode = await saveSharedDashboardValue(storageKeys.sellingEntries, next);
-      setEntries(next);
+      const mode = await saveSharedDashboardRow(storageKeys.sellingEntries, updated, previous ?? null);
+      setEntries(current => [...current.filter(entry => entry.sourceId !== row.id), updated]);
       setErrors(current => ({ ...current, [saveKey]: '' }));
       if (field === 'amount') setEditingAmount(current => current.filter(id => id !== row.id));
       else setEditingSold(current => current.filter(id => id !== row.id));
@@ -118,11 +117,10 @@ export default function EllextRetailersClient() {
     }
     const now = new Date().toISOString();
     const updated: SellingEntry = { ...previous, sourceId: row.id, soldCount: previous?.soldCount ?? 0, retailerAmountInr: amount, retailerSoldCount: soldCount, retailerUpdatedAt: now, updatedAt: previous?.updatedAt ?? now };
-    const next = [...entries.filter(entry => entry.sourceId !== row.id), updated];
     setSavingId(row.id);
     try {
-      const mode = await saveSharedDashboardValue(storageKeys.sellingEntries, next);
-      setEntries(next); setErrors(current => ({ ...current, [row.id]: '' }));
+      const mode = await saveSharedDashboardRow(storageKeys.sellingEntries, updated, previous ?? null);
+      setEntries(current => [...current.filter(entry => entry.sourceId !== row.id), updated]); setErrors(current => ({ ...current, [row.id]: '' }));
       setNotice(mode === 'supabase' ? `Retailer details saved for ${row.category || row.description}.` : 'Saved on this device only; Supabase is unavailable, so other accounts will not see this update.');
     } catch (error) { setErrors(current => ({ ...current, [row.id]: error instanceof Error ? error.message : 'Could not save retailer details.' })); }
     finally { setSavingId(''); }

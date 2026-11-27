@@ -7,7 +7,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, ty
 import { ArrowLeftRight, Archive, ChartNoAxesColumnIncreasing, Check, LayoutDashboard, LogOut, Pencil, Percent, Plus, ReceiptText, Store, Trash2, Upload, X } from 'lucide-react';
 import { defaultProductCategories, isStoredCurrencyRate, isStoredCurrencyRows, isStoredSellingEntries, storageKeys, type CurrencyRateSnapshot, type CurrencyRow } from '../../lib/storage';
 import { MobileFinanceNav } from '../../components/mobile-finance-nav';
-import { loadSharedDashboardValue, saveSharedDashboardValue } from '../../lib/shared-dashboard';
+import { deleteSharedDashboardRow, loadSharedDashboardValue, saveSharedDashboardRow, saveSharedDashboardValue } from '../../lib/shared-dashboard';
 import { fetchWithDataLoading } from '@/lib/data-fetch';
 
 type ExchangeApiResponse = { result?: string; base_code?: string; rates?: { INR?: number }; time_last_update_utc?: string };
@@ -39,6 +39,7 @@ export default function CurrencyExchangePage() {
   const [notice, setNotice] = useState('');
   const [savingRow, setSavingRow] = useState(false);
   const saveRowInFlight = useRef(false);
+  const pendingNewRow = useRef<{ id: string; date: string } | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const cachedRate = useRef<CurrencyRateSnapshot | null>(null);
 
@@ -122,14 +123,23 @@ export default function CurrencyExchangePage() {
       if (typeof reader.result !== 'string') { setError('The selected image could not be read.'); return; }
       const source = new window.Image();
       source.onload = () => {
-        const scale = Math.min(1, 900 / Math.max(source.naturalWidth, source.naturalHeight));
         const canvas = document.createElement('canvas');
-        canvas.width = Math.max(1, Math.round(source.naturalWidth * scale));
-        canvas.height = Math.max(1, Math.round(source.naturalHeight * scale));
         const context = canvas.getContext('2d');
         if (!context) { setError('This image could not be prepared for storage.'); return; }
-        context.drawImage(source, 0, 0, canvas.width, canvas.height);
-        setImage(canvas.toDataURL('image/jpeg', 0.9));
+        let scale = Math.min(1, 900 / Math.max(source.naturalWidth, source.naturalHeight));
+        let quality = 0.86;
+        let prepared = '';
+        for (let attempt = 0; attempt < 10; attempt += 1) {
+          canvas.width = Math.max(1, Math.round(source.naturalWidth * scale));
+          canvas.height = Math.max(1, Math.round(source.naturalHeight * scale));
+          context.drawImage(source, 0, 0, canvas.width, canvas.height);
+          prepared = canvas.toDataURL('image/jpeg', quality);
+          if (prepared.length <= 3_000_000) break;
+          if (quality > 0.6) quality -= 0.08;
+          else { scale *= 0.82; quality = 0.78; }
+        }
+        if (prepared.length > 3_000_000) { setError('This image is too large after optimization. Choose a smaller image.'); return; }
+        setImage(prepared);
         setImageName(file.name);
         setError('');
       };
@@ -147,19 +157,23 @@ export default function CurrencyExchangePage() {
     if (!Number.isFinite(usdAmount) || usdAmount <= 0) { setError('Enter a USD amount greater than 0.'); return; }
     if (!Number.isInteger(count) || count < 1 || count > 999999) { setError('Enter a product count from 1 to 999,999.'); return; }
     if (!image) { setError('Add an image to continue.'); return; }
-    const nextRows = editingId
-      ? rows.map(row => row.id === editingId ? { ...row, description: description.trim(), usd: usdAmount, productCount: count, image, category } : row)
-      : [...rows, { id: crypto.randomUUID(), date: new Date().toISOString(), image, description: description.trim(), usd: usdAmount, productCount: count, active: true, category }];
+    const originalRow = editingId ? rows.find(row => row.id === editingId) ?? null : null;
+    if (!originalRow && !pendingNewRow.current) pendingNewRow.current = { id: crypto.randomUUID(), date: new Date().toISOString() };
+    const row: CurrencyRow = originalRow
+      ? { ...originalRow, description: description.trim(), usd: usdAmount, productCount: count, image, category }
+      : { id: pendingNewRow.current!.id, date: pendingNewRow.current!.date, image, description: description.trim(), usd: usdAmount, productCount: count, active: true, category };
     saveRowInFlight.current = true;
     setSavingRow(true);
     try {
-      const storageMode = await saveSharedDashboardValue(storageKeys.currencyRows, nextRows);
-      setRows(nextRows); setNotice(storageMode === 'sqlite' ? 'Saved locally only. Supabase is unavailable; other accounts will not see this row yet.' : editingId ? 'Exchange row updated' : 'Exchange row added'); setModalOpen(false); resetForm();
+      const storageMode = await saveSharedDashboardRow(storageKeys.currencyRows, row, originalRow);
+      setRows(current => originalRow ? current.map(item => item.id === row.id ? row : item) : current.some(item => item.id === row.id) ? current.map(item => item.id === row.id ? row : item) : [...current, row]);
+      pendingNewRow.current = null;
+      setNotice(storageMode === 'sqlite' ? 'Saved locally only. Supabase is unavailable; other accounts will not see this row yet.' : editingId ? 'Exchange row updated' : 'Exchange row added'); setModalOpen(false); resetForm();
     } catch (cause) { setError(cause instanceof Error ? `${cause.message} The draft was preserved for recovery.` : 'Could not save the exchange row. The draft was preserved for recovery.'); }
     finally { saveRowInFlight.current = false; setSavingRow(false); }
   };
-  const deleteRow = async (id: string) => { const nextRows = rows.filter(row => row.id !== id); try { const mode = await saveSharedDashboardValue(storageKeys.currencyRows, nextRows); setRows(nextRows); setNotice(mode === 'sqlite' ? 'Deleted locally only; Supabase is unavailable, so the change is not shared.' : 'Exchange row deleted'); } catch (cause) { setNotice(cause instanceof Error ? cause.message : 'Could not delete the exchange row.'); } };
-  const archiveRow = async (id: string) => { const nextRows = rows.map(row => row.id === id ? { ...row, active: !row.active } : row); try { const mode = await saveSharedDashboardValue(storageKeys.currencyRows, nextRows); setRows(nextRows); setNotice(mode === 'sqlite' ? 'Updated locally only; Supabase is unavailable, so the change is not shared.' : showArchived ? 'Exchange row restored' : 'Exchange row archived'); } catch (cause) { setNotice(cause instanceof Error ? cause.message : 'Could not update the exchange row.'); } };
+  const deleteRow = async (id: string) => { const existing = rows.find(row => row.id === id); if (!existing) return; try { const mode = await deleteSharedDashboardRow(storageKeys.currencyRows, existing); setRows(current => current.filter(row => row.id !== id)); setNotice(mode === 'sqlite' ? 'Deleted locally only; Supabase is unavailable, so the change is not shared.' : 'Exchange row deleted'); } catch (cause) { setNotice(cause instanceof Error ? cause.message : 'Could not delete the exchange row.'); } };
+  const archiveRow = async (id: string) => { const existing = rows.find(row => row.id === id); if (!existing) return; const updated = { ...existing, active: !existing.active }; try { const mode = await saveSharedDashboardRow(storageKeys.currencyRows, updated, existing); setRows(current => current.map(row => row.id === id ? updated : row)); setNotice(mode === 'sqlite' ? 'Updated locally only; Supabase is unavailable, so the change is not shared.' : showArchived ? 'Exchange row restored' : 'Exchange row archived'); } catch (cause) { setNotice(cause instanceof Error ? cause.message : 'Could not update the exchange row.'); } };
   const addCategory = async () => { const next = newCategory.trim(); if (!next) return; if (categories.some(item => item.toLowerCase() === next.toLowerCase())) { setError('That category already exists.'); return; } const nextCategories = [...categories, next]; try { const mode = await saveSharedDashboardValue(storageKeys.productCategories, nextCategories.filter(item => !defaultProductCategories.includes(item))); setCategories(nextCategories); setCategory(next); setNewCategory(''); setCategoryModalOpen(false); setNotice(mode === 'sqlite' ? `Category saved locally only: ${next}` : `Category added: ${next}`); } catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not save the category.'); } };
   const signOut = async () => { await fetchWithDataLoading('/api/auth/sign-out', { method: 'POST' }); window.location.assign('/sign-in'); };
 
@@ -201,7 +215,7 @@ export default function CurrencyExchangePage() {
 
     {modalOpen && <div className="modal-scrim" onMouseDown={event => { if (event.target === event.currentTarget) setModalOpen(false); }}><section className="modal-card currency-modal" role="dialog" aria-modal="true" aria-labelledby="currency-modal-title"><div className="modal-heading"><div><span className="currency-kicker">{editingId ? 'UPDATE ENTRY' : 'NEW ENTRY'}</span><h2 id="currency-modal-title">{editingId ? 'Edit exchange row' : 'Add exchange row'}</h2></div><button className="modal-close" onClick={() => setModalOpen(false)} aria-label="Close dialog"><X size={18} /></button></div>
       <form className="action-form" onSubmit={saveRow} noValidate><label>Product image <span>(up to 5 MB)</span><button type="button" className="currency-upload" onClick={() => fileRef.current?.click()}>{image ? <span className="upload-preview"><Image src={image} alt="Selected product preview" fill sizes="64px" unoptimized /></span> : <span className="upload-icon"><Upload size={18} /></span>}<span><b>{imageName || 'Choose an image'}</b><small>{image ? 'Click to replace image' : 'JPG, PNG, WebP'}</small></span><Plus size={17} /></button><input ref={fileRef} className="currency-file-input" type="file" accept="image/*" onChange={loadImage} /></label>
-        <label>Description<input autoFocus value={description} onChange={event => { setDescription(event.target.value); setError(''); }} placeholder="Product or purchase description" /></label>
+        <label>Description<input autoFocus maxLength={500} value={description} onChange={event => { setDescription(event.target.value); setError(''); }} placeholder="Product or purchase description" /></label>
         <div className="currency-form-grid"><label>Category<div className="category-select-row"><select value={category} onChange={event => setCategory(event.target.value)}>{categories.map(item => <option key={item} value={item}>{item}</option>)}</select><button type="button" className="category-add-button" onClick={() => { setNewCategory(''); setError(''); setCategoryModalOpen(true); }} aria-label="Add category" title="Add category"><Plus size={17} /></button></div></label><label>Product count<input type="number" min="1" step="1" value={productCount} onChange={event => { setProductCount(event.target.value); setError(''); }} placeholder="1" /></label><label>USD buy value<input type="number" min="0.01" step="0.01" value={usd} onChange={event => { setUsd(event.target.value); setError(''); }} placeholder="0.00" /></label></div>
         <div className="currency-conversion-preview"><span><ArrowLeftRight size={15} /> Estimated INR value</span><b>{rate && Number(usd) > 0 ? formatMoney(Number(usd) * rate.usdToInr, 'INR') : '—'}</b><small>{rate ? `At 1 USD = ${rate.usdToInr.toFixed(4)} INR` : 'Exchange rate is loading'}</small></div>
         {!rate && <p className="currency-rate-help" role="status">The row can be saved now. INR conversion will appear when the exchange rate is available.</p>}

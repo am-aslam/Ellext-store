@@ -13,6 +13,9 @@ export type SharedDashboardKey = typeof sharedDashboardKeys[number];
 const saveQueue = new Map<SharedDashboardKey, Promise<'supabase' | 'sqlite'>>();
 const revisions = new Map<SharedDashboardKey, string | null>();
 const sharedReadQueue = new Map<string, Promise<unknown>>();
+const MAX_SHARED_API_BODY_BYTES = 4 * 1024 * 1024;
+type SharedRowKey = typeof storageKeys.currencyRows | typeof storageKeys.productIncreases | typeof storageKeys.sellingEntries;
+type SharedRow = CurrencyRow | ProductIncrease | SellingEntry;
 
 export type DashboardOverview = { rows: CurrencyRow[]; increases: ProductIncrease[]; sales: SellingEntry[] };
 
@@ -185,30 +188,149 @@ export function saveSharedDashboardValue(key: SharedDashboardKey, value: unknown
   const expectedRevision = revisions.get(key) ?? null;
   const next = previous.catch(() => {}).then(async () => {
     try {
+      const serializedValue = JSON.stringify(value);
+      const valueBytes = new TextEncoder().encode(serializedValue).byteLength;
+      const body = JSON.stringify({ key, value, revision: expectedRevision });
+      const payloadBytes = new TextEncoder().encode(body).byteLength;
+      if (payloadBytes > MAX_SHARED_API_BODY_BYTES) throw new Error(`This shared snapshot is ${payloadBytes.toLocaleString('en-US')} bytes, above the 4 MiB API limit. Save individual rows instead; no data was changed.`);
+      const embeddedImageBytes = Array.isArray(value)
+        ? value.reduce((total, item) => total + (item && typeof item === 'object' && 'image' in item && typeof item.image === 'string' ? new TextEncoder().encode(item.image).byteLength : 0), 0)
+        : 0;
+      console.info('[shared-dashboard:payload]', JSON.stringify({ key, operation: 'replace-snapshot', valueBytesBeforeEnvelope: valueBytes, requestBytesAfterSerialization: payloadBytes, recordCount: Array.isArray(value) ? value.length : null, embeddedImageBytes }));
       const response = await fetchWithDataLoading('/api/shared-dashboard', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ key, value, revision: expectedRevision }),
+          body,
       });
-      const responseText = await response.text();
-      let result: { error?: string; storageMode?: 'supabase' | 'sqlite'; revision?: string; requestId?: string } = {};
-      try { result = JSON.parse(responseText) as typeof result; } catch { /* Surface the HTTP status below without echoing server HTML. */ }
-      const requestId = response.headers.get('x-request-id') || result.requestId;
-      if (!response.ok) {
-        const details = result.error || `Shared-data API returned HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ''}.`;
-        if (response.status === 409) {
-          try { await refreshSharedValueAfterConflict(key); }
-          catch { /* The submitted snapshot is still preserved below if refresh is unavailable. */ }
-          throw new Error(`Revision conflict: ${details} The latest shared snapshot was refreshed when reachable, and this submitted version was preserved for recovery. Refresh this page before retrying.${requestId ? ` (request ${requestId})` : ''}`);
-        }
-        throw new Error(`${details}${requestId ? ` (request ${requestId})` : ''}`);
-      }
-      if (!result.revision || !result.storageMode) throw new Error(`Shared-data API returned an incomplete save confirmation${requestId ? ` (request ${requestId})` : ''}.`);
+      const result = await parseSharedSaveResponse(response, key, payloadBytes);
       revisions.set(key, typeof result.revision === 'string' ? result.revision : null);
       writeVersioned(key, value);
       return result.storageMode === 'sqlite' ? 'sqlite' : 'supabase';
     } catch (error) {
       preserveForRecovery(key, value);
+      throw error;
+    }
+  });
+  saveQueue.set(key, next);
+  return next.finally(() => { if (saveQueue.get(key) === next) saveQueue.delete(key); });
+}
+
+type SharedSaveResponse = { error?: string; storageMode?: 'supabase' | 'sqlite'; revision?: string; merged?: boolean; requestId?: string };
+
+async function parseSharedSaveResponse(response: Response, key: SharedDashboardKey, payloadBytes: number): Promise<SharedSaveResponse & { storageMode: 'supabase' | 'sqlite'; revision: string }> {
+  const responseText = await response.text();
+  let result: SharedSaveResponse = {};
+  try { result = JSON.parse(responseText) as SharedSaveResponse; } catch { /* Do not echo proxy HTML or response bodies. */ }
+  const requestId = response.headers.get('x-request-id') || result.requestId;
+  if (!response.ok) {
+    const details = result.error || `Shared-data API returned HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ''}.`;
+    const origin = response.headers.get('x-request-id')
+      ? 'Next.js route handler'
+      : response.headers.get('x-vercel-id')
+        ? 'Vercel gateway (no application request id)'
+        : response.headers.get('server') || 'upstream gateway';
+    if (response.status === 409) {
+      try { await refreshSharedValueAfterConflict(key); } catch { /* Keep the recovery draft if refresh is unavailable. */ }
+      throw new Error(`Revision conflict: ${details} Latest shared data was refreshed when reachable; this submitted version is preserved. Refresh before retrying.${requestId ? ` (request ${requestId})` : ''}`);
+    }
+    const measured = response.status === 413 ? ` Request measured ${payloadBytes.toLocaleString('en-US')} bytes; response source: ${origin}.` : '';
+    throw new Error(`${details}${measured}${requestId ? ` (request ${requestId})` : ''}`);
+  }
+  if (!result.revision || !result.storageMode) throw new Error(`Shared-data API returned an incomplete save confirmation${requestId ? ` (request ${requestId})` : ''}.`);
+  return { ...result, storageMode: result.storageMode, revision: result.revision };
+}
+
+function sharedRowValidator(key: SharedRowKey): (value: unknown) => value is SharedRow[] {
+  switch (key) {
+    case storageKeys.currencyRows: return isStoredCurrencyRows;
+    case storageKeys.productIncreases: return isStoredProductIncreases;
+    case storageKeys.sellingEntries: return isStoredSellingEntries;
+  }
+}
+function mergeRowCache(key: SharedRowKey, row: SharedRow, deleting = false) {
+  const id = key === storageKeys.currencyRows ? (row as CurrencyRow).id : (row as ProductIncrease | SellingEntry).sourceId;
+  const validator = sharedRowValidator(key);
+  const cached = readVersioned(key, validator) ?? [];
+  const next = deleting
+    ? cached.filter(item => (key === storageKeys.currencyRows ? (item as CurrencyRow).id : (item as ProductIncrease | SellingEntry).sourceId) !== id)
+    : [...cached.filter(item => (key === storageKeys.currencyRows ? (item as CurrencyRow).id : (item as ProductIncrease | SellingEntry).sourceId) !== id), row];
+  writeVersioned(key, next);
+}
+async function digestText(value: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
+  return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
+}
+
+async function sendSharedDashboardRow(key: SharedRowKey, operation: 'upsert' | 'delete', id: string, row: SharedRow | null, baseRow: SharedRow | null, expectedRevision: string | null): Promise<'supabase' | 'sqlite'> {
+  let baseForConflict: unknown | null = baseRow;
+  let baseImageDigest: string | null = null;
+  let rowForRequest = row;
+  if (key === storageKeys.currencyRows && baseRow) {
+    const { image, ...withoutImage } = baseRow as CurrencyRow;
+    baseForConflict = withoutImage;
+    baseImageDigest = await digestText(image);
+    if (row && (row as CurrencyRow).image === image) {
+      const { image: _unchangedImage, ...withoutUnchangedImage } = row as CurrencyRow;
+      rowForRequest = withoutUnchangedImage as unknown as SharedRow;
+    }
+  }
+  const requestBody = JSON.stringify({
+    key,
+    operation: operation === 'upsert' ? 'row-upsert' : 'row-delete',
+    id,
+    ...(rowForRequest ? { row: rowForRequest } : {}),
+    baseRow: baseForConflict,
+    ...(baseImageDigest ? { baseImageDigest } : {}),
+    revision: expectedRevision,
+  });
+  const payloadBytes = new TextEncoder().encode(requestBody).byteLength;
+  const rowBytesBeforeEnvelope = rowForRequest ? new TextEncoder().encode(JSON.stringify(rowForRequest)).byteLength : 0;
+  const cached = readVersioned(key, sharedRowValidator(key)) ?? [];
+  const imageBytes = key === storageKeys.currencyRows ? cached.reduce((total, item) => total + new TextEncoder().encode((item as CurrencyRow).image).byteLength, 0) : 0;
+  const legacySnapshotBytes = new TextEncoder().encode(JSON.stringify({ key, value: cached, revision: expectedRevision })).byteLength;
+  console.info('[shared-dashboard:payload]', JSON.stringify({ key, operation, rowBytesBeforeEnvelope, requestBytesAfterSerialization: payloadBytes, previousWholeSnapshotBytes: legacySnapshotBytes, recordCount: cached.length, embeddedImageBytes: imageBytes }));
+  if (payloadBytes > MAX_SHARED_API_BODY_BYTES) throw new Error(`This row update is ${payloadBytes.toLocaleString('en-US')} bytes, above the 4 MiB API limit. Reduce the image size and retry; no data was changed.`);
+
+  const response = await fetchWithDataLoading('/api/shared-dashboard', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: requestBody,
+  });
+  const result = await parseSharedSaveResponse(response, key, payloadBytes);
+  revisions.set(key, result.revision);
+  if (result.merged) {
+    // A safe row-level merge may include unrelated edits from another tab.
+    // Refresh the complete authoritative snapshot before replacing the cache.
+    try { await loadSharedDashboardValue(key, sharedRowValidator(key)); }
+    catch { /* Server confirmed the row; keep the preexisting cache and revision. */ }
+  } else if (row) mergeRowCache(key, row, operation === 'delete');
+  else if (operation === 'delete' && baseRow) mergeRowCache(key, baseRow, true);
+  return result.storageMode;
+}
+
+export function saveSharedDashboardRow(key: SharedRowKey, row: SharedRow, baseRow: SharedRow | null): Promise<'supabase' | 'sqlite'> {
+  const id = key === storageKeys.currencyRows ? (row as CurrencyRow).id : (row as ProductIncrease | SellingEntry).sourceId;
+  const expectedRevision = revisions.get(key) ?? null;
+  const previous = saveQueue.get(key) ?? Promise.resolve<'supabase' | 'sqlite'>('supabase');
+  const next = previous.catch(() => {}).then(async () => {
+    try { return await sendSharedDashboardRow(key, 'upsert', id, row, baseRow, expectedRevision); }
+    catch (error) {
+      preserveForRecovery(key, { operation: 'upsert-row', id, row, baseRow, savedAt: new Date().toISOString() });
+      throw error;
+    }
+  });
+  saveQueue.set(key, next);
+  return next.finally(() => { if (saveQueue.get(key) === next) saveQueue.delete(key); });
+}
+
+export function deleteSharedDashboardRow(key: SharedRowKey, row: SharedRow): Promise<'supabase' | 'sqlite'> {
+  const id = key === storageKeys.currencyRows ? (row as CurrencyRow).id : (row as ProductIncrease | SellingEntry).sourceId;
+  const expectedRevision = revisions.get(key) ?? null;
+  const previous = saveQueue.get(key) ?? Promise.resolve<'supabase' | 'sqlite'>('supabase');
+  const next = previous.catch(() => {}).then(async () => {
+    try { return await sendSharedDashboardRow(key, 'delete', id, null, row, expectedRevision); }
+    catch (error) {
+      preserveForRecovery(key, { operation: 'delete-row', id, baseRow: row, savedAt: new Date().toISOString() });
       throw error;
     }
   });

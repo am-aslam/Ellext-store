@@ -7,7 +7,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { ArrowLeftRight, ChartNoAxesColumnIncreasing, Check, LayoutDashboard, LockKeyhole, LogOut, Pencil, Percent, ReceiptText, Share2, Store, UnlockKeyhole } from 'lucide-react';
 import { isStoredCurrencyRate, isStoredCurrencyRows, isStoredProductIncreases, isStoredSellingEntries, storageKeys, type CurrencyRateSnapshot, type CurrencyRow, type ProductIncrease, type SellingEntry } from '../../lib/storage';
 import { MobileFinanceNav } from '../../components/mobile-finance-nav';
-import { loadSharedDashboardValue, saveSharedDashboardValue } from '../../lib/shared-dashboard';
+import { loadSharedDashboardValue, saveSharedDashboardRow } from '../../lib/shared-dashboard';
 import { shareProductWithImage } from '@/lib/product-share';
 import { fetchWithDataLoading } from '@/lib/data-fetch';
 
@@ -66,10 +66,9 @@ export default function ProductPercentagePage() {
       return;
     }
     const entry: ProductIncrease = { sourceId: row.id, increaseInr: value, locked: true, updatedAt: new Date().toISOString() };
-    const nextIncreases = [...increases.filter(item => item.sourceId !== row.id), entry];
     try {
-      const storageMode = await saveSharedDashboardValue(storageKeys.productIncreases, nextIncreases);
-      setIncreases(nextIncreases);
+      const storageMode = await saveSharedDashboardRow(storageKeys.productIncreases, entry, increaseMap.get(row.id) ?? null);
+      setIncreases(current => [...current.filter(item => item.sourceId !== row.id), entry]);
       setEditingIds(current => current.filter(id => id !== row.id));
       setErrors(current => ({ ...current, [row.id]: '' }));
       setNotice(storageMode === 'sqlite' ? `Saved locally only for ${row.description}; Supabase is unavailable, so other accounts will not see this update yet.` : `Company amount saved for ${row.description}`);
