@@ -4,42 +4,16 @@ import Link from 'next/link';
 import { BrandLogo } from '@/components/brand-logo';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { ArrowLeftRight, ChartNoAxesColumnIncreasing, LayoutDashboard, LogOut, Menu, Percent, ReceiptText, ShieldCheck, ShoppingBag, Store, TrendingUp, X } from 'lucide-react';
-import { isStoredCurrencyRows, isStoredProductIncreases, isStoredSellingEntries, readVersioned, storageKeys, type CurrencyRow, type ProductIncrease, type SellingEntry } from '../lib/storage';
-import { loadDashboardOverview } from '../lib/shared-dashboard';
+import { isStoredCurrencyRows, isStoredProductIncreases, isStoredSellingEntries, storageKeys, type CurrencyRow, type ProductIncrease, type SellingEntry } from '../lib/storage';
+import { getSharedDataDiagnostics, loadDashboardOverview, readCachedSharedDashboardValue, reconcileSharedReferences } from '../lib/shared-dashboard';
 import { fetchWithDataLoading } from '@/lib/data-fetch';
+import { calculateDashboardSales } from '@/lib/financial-calculations';
 
-type DashboardSale = {
-  row: CurrencyRow;
-  sold: number;
-  collected: number | null;
-  updatedAt: string;
-  hasLog: boolean;
-};
-type DashboardData = { rows: DashboardSale[]; sold: number; available: number; collected: number | null };
+type DashboardSale = ReturnType<typeof calculateDashboardSales>['rows'][number];
+type DashboardData = ReturnType<typeof calculateDashboardSales>;
 const emptyDashboard: DashboardData = { rows: [], sold: 0, available: 0, collected: null };
 const formatInr = (amount: number) => new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 2 }).format(amount);
 const formatDate = (date: string) => new Intl.DateTimeFormat('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }).format(new Date(date));
-
-function buildDashboardData(allRows: CurrencyRow[], increases: ProductIncrease[], sellingEntries: SellingEntry[]): DashboardData {
-  const currencyRows = allRows.filter(row => row.active);
-  const increaseById = new Map(increases.map(item => [item.sourceId, item.increaseInr]));
-  const saleById = new Map(sellingEntries.map(item => [item.sourceId, item]));
-  const rows = currencyRows
-    .map(row => {
-      const sale = saleById.get(row.id);
-      const sold = sale?.soldCount ?? 0;
-      const companyAmount = increaseById.get(row.id);
-      const collected = companyAmount === undefined ? null : sold * companyAmount;
-      return { row, sold, collected, updatedAt: sale?.updatedAt ?? row.date, hasLog: Boolean(sale) };
-    })
-    .sort((left, right) => Date.parse(right.row.date) - Date.parse(left.row.date));
-  return {
-    rows,
-    sold: rows.reduce((total, item) => total + item.sold, 0),
-    available: rows.reduce((total, item) => total + Math.max(0, item.row.productCount - item.sold), 0),
-    collected: rows.some(item => item.collected !== null) ? rows.reduce((total, item) => total + (item.collected ?? 0), 0) : null,
-  };
-}
 
 function DashboardSidebar({ open, onClose, data, isSuperAdmin }: { open: boolean; onClose: () => void; data: DashboardData; isSuperAdmin: boolean }) {
   const signOut = async () => { await fetchWithDataLoading('/api/auth/sign-out', { method: 'POST' }); window.location.assign('/sign-in'); };
@@ -73,18 +47,23 @@ export default function Dashboard({ isSuperAdmin }: { isSuperAdmin: boolean }) {
     let increases: ProductIncrease[];
     let sales: SellingEntry[];
     let sharedReadError = '';
+    let hasExcludedRecords = false;
     try {
       const overview = await loadDashboardOverview();
       rows = overview.rows;
       increases = overview.increases;
       sales = overview.sales;
+      hasExcludedRecords = overview.validationIssues.some(issue => issue.status !== 'financial_calculation_incomplete');
     } catch (cause) {
       sharedReadError = cause instanceof Error ? cause.message : 'Shared data request failed.';
-      rows = readVersioned(storageKeys.currencyRows, isStoredCurrencyRows) ?? [];
-      increases = readVersioned(storageKeys.productIncreases, isStoredProductIncreases) ?? [];
-      sales = readVersioned(storageKeys.sellingEntries, isStoredSellingEntries) ?? [];
+      rows = readCachedSharedDashboardValue(storageKeys.currencyRows, isStoredCurrencyRows) ?? [];
+      increases = readCachedSharedDashboardValue(storageKeys.productIncreases, isStoredProductIncreases) ?? [];
+      sales = readCachedSharedDashboardValue(storageKeys.sellingEntries, isStoredSellingEntries) ?? [];
+      const safeRead = reconcileSharedReferences(rows, increases, sales);
+      rows = safeRead.rows; increases = safeRead.increases; sales = safeRead.sales;
+      hasExcludedRecords = getSharedDataDiagnostics().some(issue => issue.status !== 'financial_calculation_incomplete');
     }
-    setData(buildDashboardData(rows, increases, sales));
+    setData(calculateDashboardSales(rows, increases, sales, hasExcludedRecords));
     setSyncWarning(sharedReadError ? `${sharedReadError} Showing this browser’s cached data only; unsynced changes are not visible to other accounts.` : '');
   }, []);
   useEffect(() => {

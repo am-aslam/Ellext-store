@@ -8,6 +8,7 @@
     "start": "next start",
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
+    "test:shared-row": "node --test tests/shared-row-mutation.test.cjs",
     "db:migrate": "node scripts/migrate-database.cjs"
   },
   "dependencies": {

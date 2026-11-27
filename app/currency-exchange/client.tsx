@@ -7,7 +7,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, ty
 import { ArrowLeftRight, Archive, ChartNoAxesColumnIncreasing, Check, LayoutDashboard, LogOut, Pencil, Percent, Plus, ReceiptText, Store, Trash2, Upload, X } from 'lucide-react';
 import { defaultProductCategories, isStoredCurrencyRate, isStoredCurrencyRows, isStoredSellingEntries, storageKeys, type CurrencyRateSnapshot, type CurrencyRow } from '../../lib/storage';
 import { MobileFinanceNav } from '../../components/mobile-finance-nav';
-import { deleteSharedDashboardRow, loadSharedDashboardValue, saveSharedDashboardRow, saveSharedDashboardValue } from '../../lib/shared-dashboard';
+import { deleteSharedDashboardRow, loadSharedDashboardValue, readCachedSharedDashboardValue, reconcileSharedReferences, saveSharedDashboardRow, saveSharedDashboardValue } from '../../lib/shared-dashboard';
 import { fetchWithDataLoading } from '@/lib/data-fetch';
 
 type ExchangeApiResponse = { result?: string; base_code?: string; rates?: { INR?: number }; time_last_update_utc?: string };
@@ -47,7 +47,7 @@ export default function CurrencyExchangePage() {
     let active = true;
     const load = async <T,>(key: typeof storageKeys.currencyRows | typeof storageKeys.currencyRate | typeof storageKeys.sellingEntries | typeof storageKeys.productCategories, validate: (value: unknown) => value is T, fallback: T): Promise<T> => {
       try { return await loadSharedDashboardValue(key, validate) ?? fallback; }
-      catch { if (active) setNotice('Shared company data is unavailable. Device data was preserved for recovery; reconnect before editing shared records.'); return fallback; }
+      catch { if (active) setNotice('Shared company data is unavailable. Device data was preserved for recovery; reconnect before editing shared records.'); return readCachedSharedDashboardValue(key, validate) ?? fallback; }
     };
     void (async () => {
       const [savedRows, savedCategories, selling, savedRate] = await Promise.all([
@@ -57,9 +57,10 @@ export default function CurrencyExchangePage() {
         load(storageKeys.currencyRate, isStoredCurrencyRate, null),
       ]);
       if (!active) return;
-      setRows(savedRows);
+      const safeRead = reconcileSharedReferences(savedRows, [], selling, { validatePrices: false });
+      setRows(safeRead.rows);
       setCategories([...defaultProductCategories, ...savedCategories.filter(item => !defaultProductCategories.includes(item))]);
-      setSoldById(Object.fromEntries(selling.map(item => [item.sourceId, item.soldCount])));
+      setSoldById(Object.fromEntries(safeRead.sales.map(item => [item.sourceId, item.soldCount])));
       if (savedRate) { setRate(savedRate); cachedRate.current = savedRate; }
       setHydrated(true);
     })();

@@ -43,15 +43,44 @@ export type SellingEntry = {
   updatedAt: string;
 };
 
+export type SharedRowSnapshotKey = typeof storageKeys.currencyRows | typeof storageKeys.productIncreases | typeof storageKeys.sellingEntries;
+export type StoredRowValidationIssue = { field: string; rule: string };
+
+/** Return only safe schema diagnostics; never include the rejected value. */
+export function getStoredRowValidationIssue(key: SharedRowSnapshotKey, item: unknown): StoredRowValidationIssue | null {
+  if (!isRecord(item)) return { field: '$', rule: 'expected_object' };
+  const fail = (field: string, rule: string) => ({ field, rule });
+  if (key === storageKeys.currencyRows) {
+    if (typeof item.id !== 'string') return fail('id', 'string');
+    if (typeof item.date !== 'string' || !Number.isFinite(Date.parse(item.date))) return fail('date', 'valid_timestamp_string');
+    if (typeof item.image !== 'string' || item.image.length > 5_000_000) return fail('image', 'string_max_5000000');
+    if (typeof item.description !== 'string' || item.description.trim().length < 2) return fail('description', 'string_min_2');
+    if (!Number.isFinite(item.usd) || Number(item.usd) < 0) return fail('usd', 'finite_nonnegative_number');
+    if (!Number.isInteger(item.productCount) || Number(item.productCount) < 0) return fail('productCount', 'nonnegative_integer');
+    if (item.category !== undefined && typeof item.category !== 'string') return fail('category', 'optional_string');
+    if (typeof item.active !== 'boolean') return fail('active', 'boolean');
+    return null;
+  }
+  if (key === storageKeys.productIncreases) {
+    if (typeof item.sourceId !== 'string') return fail('sourceId', 'string');
+    if (!Number.isFinite(item.increaseInr) || Number(item.increaseInr) < 0) return fail('increaseInr', 'finite_nonnegative_number');
+    if (typeof item.locked !== 'boolean') return fail('locked', 'boolean');
+    if (!isTimestamp(item.updatedAt)) return fail('updatedAt', 'valid_timestamp');
+    return null;
+  }
+  if (typeof item.sourceId !== 'string') return fail('sourceId', 'string');
+  if (!Number.isInteger(item.soldCount) || Number(item.soldCount) < 0) return fail('soldCount', 'nonnegative_integer');
+  if (item.unitExpense !== undefined && (!Number.isFinite(item.unitExpense) || Number(item.unitExpense) < 0)) return fail('unitExpense', 'optional_finite_nonnegative');
+  if (item.unitExpenseNote !== undefined && (typeof item.unitExpenseNote !== 'string' || item.unitExpenseNote.length > 500)) return fail('unitExpenseNote', 'optional_string_max_500');
+  if (item.retailerAmountInr !== undefined && (!Number.isFinite(item.retailerAmountInr) || Number(item.retailerAmountInr) <= 0)) return fail('retailerAmountInr', 'optional_finite_positive');
+  if (item.retailerSoldCount !== undefined && (!Number.isInteger(item.retailerSoldCount) || Number(item.retailerSoldCount) < 0)) return fail('retailerSoldCount', 'optional_nonnegative_integer');
+  if (item.retailerUpdatedAt !== undefined && !isTimestamp(item.retailerUpdatedAt)) return fail('retailerUpdatedAt', 'optional_valid_timestamp');
+  if (!isTimestamp(item.updatedAt)) return fail('updatedAt', 'valid_timestamp');
+  return null;
+}
+
 export function isStoredSellingEntries(value: unknown): value is SellingEntry[] {
-  return Array.isArray(value) && value.every(item => isRecord(item)
-    && typeof item.sourceId === 'string' && Number.isInteger(item.soldCount) && Number(item.soldCount) >= 0
-    && (item.unitExpense === undefined || (Number.isFinite(item.unitExpense) && Number(item.unitExpense) >= 0))
-    && (item.unitExpenseNote === undefined || (typeof item.unitExpenseNote === 'string' && item.unitExpenseNote.length <= 500))
-    && (item.retailerAmountInr === undefined || (Number.isFinite(item.retailerAmountInr) && Number(item.retailerAmountInr) > 0))
-    && (item.retailerSoldCount === undefined || (Number.isInteger(item.retailerSoldCount) && Number(item.retailerSoldCount) >= 0))
-    && (item.retailerUpdatedAt === undefined || isTimestamp(item.retailerUpdatedAt))
-    && isTimestamp(item.updatedAt));
+  return Array.isArray(value) && value.every(item => getStoredRowValidationIssue(storageKeys.sellingEntries, item) === null);
 }
 
 export function isStoredExpenseLedger(value: unknown): value is ExpenseLedgerEntry[] {
@@ -64,20 +93,11 @@ export function isStoredExpenseLedger(value: unknown): value is ExpenseLedgerEnt
 }
 
 export function isStoredProductIncreases(value: unknown): value is ProductIncrease[] {
-  return Array.isArray(value) && value.every(item => isRecord(item)
-    && typeof item.sourceId === 'string' && Number.isFinite(item.increaseInr) && Number(item.increaseInr) >= 0
-    && typeof item.locked === 'boolean' && isTimestamp(item.updatedAt));
+  return Array.isArray(value) && value.every(item => getStoredRowValidationIssue(storageKeys.productIncreases, item) === null);
 }
 
 export function isStoredCurrencyRows(value: unknown): value is CurrencyRow[] {
-  return Array.isArray(value) && value.every(row => isRecord(row)
-    && typeof row.id === 'string' && typeof row.date === 'string' && Number.isFinite(Date.parse(row.date))
-    && typeof row.image === 'string' && row.image.length <= 5_000_000
-    && typeof row.description === 'string' && row.description.trim().length >= 2
-    && Number.isFinite(row.usd) && Number(row.usd) >= 0
-    && Number.isInteger(row.productCount) && Number(row.productCount) >= 0
-    && (row.category === undefined || typeof row.category === 'string')
-    && typeof row.active === 'boolean');
+  return Array.isArray(value) && value.every(row => getStoredRowValidationIssue(storageKeys.currencyRows, row) === null);
 }
 
 export function isStoredCurrencyRate(value: unknown): value is CurrencyRateSnapshot {
@@ -136,6 +156,12 @@ export function isStoredMemberInvitations(value: unknown): value is MemberInvite
 }
 
 export function readVersioned<T>(key: string, validate: (value: unknown) => value is T): T | null {
+  const data = readVersionedRaw(key);
+  return data !== null && validate(data) ? data : null;
+}
+
+/** Read only a known versioned envelope without validating or rewriting its payload. */
+export function readVersionedRaw(key: string): unknown | null {
   const storage = getBrowserStorage();
   if (!storage) return null;
   let raw: string | null;
@@ -153,7 +179,7 @@ export function readVersioned<T>(key: string, validate: (value: unknown) => valu
     // while attempting to read it.
     return null;
   }
-  if (isRecord(parsed) && parsed.version === 1 && validate(parsed.data)) return parsed.data;
+  if (isRecord(parsed) && parsed.version === 1 && Object.hasOwn(parsed, 'data')) return parsed.data;
   // An unknown version or invalid value is left untouched for recovery.
   return null;
 }

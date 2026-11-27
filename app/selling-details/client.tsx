@@ -7,7 +7,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { ArrowLeftRight, Check, ChartNoAxesColumnIncreasing, LayoutDashboard, LockKeyhole, LogOut, Percent, Plus, ReceiptText, Store, UnlockKeyhole, X } from 'lucide-react';
 import { isStoredCurrencyRows, isStoredProductIncreases, isStoredSellingEntries, storageKeys, type CurrencyRow, type ProductIncrease, type SellingEntry } from '../../lib/storage';
 import { MobileFinanceNav } from '../../components/mobile-finance-nav';
-import { loadSharedDashboardValue, saveSharedDashboardRow } from '../../lib/shared-dashboard';
+import { loadSharedDashboardValue, readCachedSharedDashboardValue, reconcileSharedReferences, saveSharedDashboardRow } from '../../lib/shared-dashboard';
 import { fetchWithDataLoading } from '@/lib/data-fetch';
 
 const formatMoney = (amount: number) => new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 2 }).format(amount);
@@ -28,7 +28,7 @@ export default function SellingDetailsPage() {
     let active = true;
     const load = async <T,>(key: typeof storageKeys.currencyRows | typeof storageKeys.productIncreases | typeof storageKeys.sellingEntries, validate: (value: unknown) => value is T, fallback: T): Promise<T> => {
       try { return await loadSharedDashboardValue(key, validate) ?? fallback; }
-      catch { if (active) setNotice('Shared company data is unavailable. Device data was preserved for recovery; reconnect before editing shared records.'); return fallback; }
+      catch { if (active) setNotice('Shared company data is unavailable. Device data was preserved for recovery; reconnect before editing shared records.'); return readCachedSharedDashboardValue(key, validate) ?? fallback; }
     };
     void (async () => {
       const [rows, savedIncreases, savedEntries] = await Promise.all([
@@ -37,8 +37,9 @@ export default function SellingDetailsPage() {
         load(storageKeys.sellingEntries, isStoredSellingEntries, [] as SellingEntry[]),
       ]);
       if (!active) return;
-      setSourceRows(rows); setIncreases(savedIncreases); setEntries(savedEntries);
-      setDrafts(Object.fromEntries(savedEntries.map(entry => [entry.sourceId, String(entry.soldCount)])));
+      const safeRead = reconcileSharedReferences(rows, savedIncreases, savedEntries);
+      setSourceRows(safeRead.rows); setIncreases(safeRead.increases); setEntries(safeRead.sales);
+      setDrafts(Object.fromEntries(safeRead.sales.map(entry => [entry.sourceId, String(entry.soldCount)])));
     })();
     return () => { active = false; };
   }, []);
@@ -54,8 +55,8 @@ export default function SellingDetailsPage() {
   const totals = useMemo(() => rows.reduce((total, row) => {
     const sold = entryMap.get(row.id)?.soldCount ?? 0;
     const sellingUnit = companyAmountMap.get(row.id) ?? null;
-    return { sold: total.sold + sold, collected: sellingUnit === null ? total.collected : total.collected + sold * sellingUnit, hasPrice: total.hasPrice || sellingUnit !== null };
-  }, { sold: 0, collected: 0, hasPrice: false }), [rows, entryMap, companyAmountMap]);
+    return { sold: total.sold + sold, collected: sellingUnit === null ? total.collected : total.collected + sold * sellingUnit, complete: total.complete && (sold === 0 || sellingUnit !== null) };
+  }, { sold: 0, collected: 0, complete: true }), [rows, entryMap, companyAmountMap]);
 
   const saveSoldCount = async (row: CurrencyRow) => {
     const rawValue = drafts[row.id] ?? '0';
@@ -114,7 +115,7 @@ export default function SellingDetailsPage() {
         <header className="currency-header"><div><div className="finance-mobile-topline"><MobileFinanceNav active="/selling-details" /><Link href="/" className="currency-mobile-home"><BrandLogo /></Link></div><span className="currency-kicker">ELLEXTSTORE · SALES</span><h1>Selling Details</h1><p>Record sold items and collected amounts.</p></div><Link href="/expense-ledger" className="currency-add"><Plus size={17}/> Expense ledger</Link></header>
         <div className="selling-summary">
           <article><span>SOLD ITEMS</span><strong>{totals.sold.toLocaleString('en-IN')}</strong><small>of {rows.reduce((sum, row) => sum + row.productCount, 0).toLocaleString('en-IN')} active products</small></article>
-          <article><span>COLLECTED AMOUNT</span><strong>{totals.hasPrice ? formatMoney(totals.collected) : '—'}</strong><small>Sold count × company selling amount</small></article>
+          <article><span>COLLECTED AMOUNT</span><strong>{totals.complete ? formatMoney(totals.collected) : '—'}</strong><small>{totals.complete ? 'Sold count × company selling amount' : 'Unavailable: a sold record has no saved company selling amount'}</small></article>
           <Link href="/expense-ledger" className="selling-summary-link"><Plus size={17} /><span>Operating expenses<br /><b>Open expense ledger</b></span></Link>
           <Link href="/product-percentage" className="selling-summary-link"><Percent size={17} /><span>Company selling amounts<br /><b>Manage product pricing</b></span></Link>
         </div>
@@ -124,7 +125,7 @@ export default function SellingDetailsPage() {
             const companyAmount = companyAmountMap.get(row.id);
             const unitSell = companyAmount ?? null;
             const soldCount = entryMap.get(row.id)?.soldCount ?? 0;
-            const collected = unitSell === null ? null : unitSell * soldCount;
+            const collected = unitSell === null && soldCount > 0 ? null : (unitSell ?? 0) * soldCount;
             return <tr key={row.id}>
               <td className="currency-date">{formatDate(row.date)}</td>
               <td><button className="currency-image-button" onClick={() => setPreview(row)} aria-label={`Preview image for ${row.description}`}><Image src={row.image} alt={row.description} fill sizes="64px" unoptimized /></button></td>
@@ -140,7 +141,7 @@ export default function SellingDetailsPage() {
           const companyAmount = companyAmountMap.get(row.id);
           const unitSell = companyAmount ?? null;
           const soldCount = entryMap.get(row.id)?.soldCount ?? 0;
-          const collected = unitSell === null ? null : unitSell * soldCount;
+          const collected = unitSell === null && soldCount > 0 ? null : (unitSell ?? 0) * soldCount;
           return <article className="selling-mobile-card" key={row.id}>
             <div className="selling-mobile-head"><button className="currency-image-button" onClick={() => setPreview(row)} aria-label={`Preview image for ${row.description}`}><Image src={row.image} alt={row.description} fill sizes="64px" unoptimized /></button><div><span>{formatDate(row.date)}</span><b>{row.description}</b></div></div>
             <div className="selling-mobile-values"><div><span>Company amount</span><b>{companyAmount === undefined ? '—' : formatMoney(companyAmount)}</b></div><div><span>Products available</span><b>{row.productCount.toLocaleString('en-IN')}</b></div><div><span>Collected</span><b>{collected === null ? '—' : formatMoney(collected)}</b></div><div><span>Sold items</span><div className={`selling-count-editor ${editingIds.includes(row.id) ? 'count-editing' : 'count-locked'}`}><label className="visually-hidden" htmlFor={`mobile-sold-${row.id}`}>Sold item count for {row.description}</label><input id={`mobile-sold-${row.id}`} type="number" min="0" max={Math.max(0,row.productCount-(entryMap.get(row.id)?.retailerSoldCount??0))} step="1" value={drafts[row.id] ?? '0'} disabled={!editingIds.includes(row.id)} onChange={event => changeSoldDraft(row, event.target.value)} />{editingIds.includes(row.id) ? <><button onClick={() => saveSoldCount(row)} aria-label={`Save and lock sold count for ${row.description}`} title="Save and lock"><Check size={15} /></button><button className="count-lock-button" onClick={() => lockSoldCount(row)} aria-label={`Cancel and lock sold count for ${row.description}`} title="Cancel and lock"><LockKeyhole size={14} /></button></> : <button className="count-unlock-button" onClick={() => unlockSoldCount(row)} aria-label={`Unlock sold count for ${row.description}`} title="Unlock to edit"><UnlockKeyhole size={15} /></button>}{errors[row.id] && <small className="increase-error" role="alert">{errors[row.id]}</small>}</div></div></div>

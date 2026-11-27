@@ -5,7 +5,7 @@ import Link from 'next/link';
 import { BrandLogo } from '@/components/brand-logo';
 import { ArrowLeft, Check, Copy, Database, FileSpreadsheet, FileText, LogOut, Plus, ReceiptText, ShieldCheck, X } from 'lucide-react';
 import { isStoredCurrencyRate, isStoredCurrencyRows, isStoredProductIncreases, isStoredSellingEntries, storageKeys, type CurrencyRateSnapshot, type CurrencyRow, type ProductIncrease, type SellingEntry } from '@/lib/storage';
-import { loadSharedDashboardValue } from '@/lib/shared-dashboard';
+import { getSharedDataDiagnostics, loadSharedDashboardValue, reconcileSharedReferences } from '@/lib/shared-dashboard';
 import { fetchWithDataLoading } from '@/lib/data-fetch';
 
 type AdminAccount = { id: string; name: string; email: string; role: 'admin' };
@@ -34,7 +34,7 @@ type BackupRow = {
 type SalesBackup = { rows: BackupRow[]; rate: CurrencyRateSnapshot | null; totalSold: number; totalCollected: number | null; generatedAt: string };
 type ExportFormat = 'excel' | 'pdf';
 
-function makeSalesBackup(products: CurrencyRow[], rate: CurrencyRateSnapshot | null, increases: ProductIncrease[], sales: SellingEntry[]): SalesBackup {
+function makeSalesBackup(products: CurrencyRow[], rate: CurrencyRateSnapshot | null, increases: ProductIncrease[], sales: SellingEntry[], hasExcludedRecords = false): SalesBackup {
   const productsById = new Map(products.map((product: CurrencyRow) => [product.id, product]));
   const increasesById = new Map(increases.map((increase: ProductIncrease) => [increase.sourceId, increase.increaseInr]));
   const latestSalesById = new Map<string, SellingEntry>();
@@ -64,7 +64,7 @@ function makeSalesBackup(products: CurrencyRow[], rate: CurrencyRateSnapshot | n
     rows,
     rate,
     totalSold: rows.reduce((sum, row) => sum + row.soldCount, 0),
-    totalCollected: rows.some(row => row.collected !== null) ? rows.reduce((sum, row) => sum + (row.collected ?? 0), 0) : null,
+    totalCollected: !hasExcludedRecords && rows.every(row => row.soldCount === 0 || row.collected !== null) ? rows.reduce((sum, row) => sum + (row.collected ?? 0), 0) : null,
     generatedAt: new Date().toISOString(),
   };
 }
@@ -107,8 +107,10 @@ export default function SuperAdminClient({ userName }: { userName: string }) {
           loadSharedDashboardValue(storageKeys.productIncreases, isStoredProductIncreases),
           loadSharedDashboardValue(storageKeys.sellingEntries, isStoredSellingEntries),
         ]);
+        const safeRead = reconcileSharedReferences(products ?? [], increases ?? [], sales ?? [], { rateAvailable: rate !== null });
+        const hasExcludedRecords = getSharedDataDiagnostics().some(issue => issue.status !== 'financial_calculation_incomplete');
         if (active) {
-          setBackup(makeSalesBackup(products ?? [], rate, increases ?? [], sales ?? []));
+          setBackup(makeSalesBackup(safeRead.rows, rate, safeRead.increases, safeRead.sales, hasExcludedRecords));
           setBackupError('');
         }
       } catch (cause) {

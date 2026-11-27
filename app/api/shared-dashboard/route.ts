@@ -1,7 +1,8 @@
 import { NextResponse } from 'next/server';
 import { randomUUID } from 'node:crypto';
 import { getCurrentUser, mutateSharedDashboardRow, readSharedDashboardOverview, readSharedDashboardValue, readSharedDashboardValues, SharedDashboardConflictError, writeSharedDashboardValue } from '@/lib/auth';
-import { isStoredCurrencyRate, isStoredCurrencyRows, isStoredProductIncreases, isStoredSellingEntries, storageKeys } from '@/lib/storage';
+import { SharedRowMutationError } from '@/lib/shared-row-mutation';
+import { getStoredRowValidationIssue, isStoredCurrencyRate, isStoredCurrencyRows, isStoredProductIncreases, isStoredSellingEntries, storageKeys } from '@/lib/storage';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -107,9 +108,13 @@ export async function PUT(request: Request) {
   let storageMode: string | null = null;
   let userRole: string | null = null;
   let operation: string | null = null;
+  let validationStage: string | null = null;
+  let validationField: string | null = null;
+  let validationRule: string | null = null;
+  let validationRecordIndex: number | null = null;
   const respond = (body: Record<string, unknown>, responseStatus = 200) => {
     status = responseStatus;
-    const log = { event: 'shared_dashboard_api', requestId, method: 'PUT', endpoint: '/api/shared-dashboard', durationMs: Math.round(performance.now() - startedAt), authDurationMs, parseDurationMs, writeDurationMs, payloadBytes, key: key || null, operation, expectedRevision, storageMode, role: userRole, status, failureCategory };
+    const log = { event: 'shared_dashboard_api', requestId, method: 'PUT', endpoint: '/api/shared-dashboard', durationMs: Math.round(performance.now() - startedAt), authDurationMs, parseDurationMs, writeDurationMs, payloadBytes, key: key || null, operation, expectedRevision, storageMode, role: userRole, status, failureCategory, validationStage, validationField, validationRule, validationRecordIndex };
     (status >= 500 ? console.error : console.info)(JSON.stringify(log));
     return NextResponse.json({ ...body, requestId }, { status, headers: { 'x-request-id': requestId } });
   };
@@ -174,10 +179,18 @@ export async function PUT(request: Request) {
         const rowForValidation = currencyImageOmitted
           ? [{ ...(body.row as Record<string, unknown>), image: 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=' }]
           : [body.row];
-        if (!rowId || (!isDelete && (!validator(rowForValidation) || (currencyImageOmitted && (!body.baseRow || typeof body.baseImageDigest !== 'string'))))) { failureCategory = 'validation'; return respond({ error: 'The row did not pass validation.' }, 400); }
-        if (body.baseRow !== null && (typeof body.baseRow !== 'object' || Array.isArray(body.baseRow))) { failureCategory = 'validation'; return respond({ error: 'The row baseline is invalid.' }, 400); }
+        const rowIssue = !isDelete && Array.isArray(rowForValidation)
+          ? getStoredRowValidationIssue(rowKey, rowForValidation[0])
+          : null;
+        if (!rowId) { validationStage = 'request_validation'; validationField = 'id'; validationRule = 'nonempty_string'; failureCategory = 'validation'; return respond({ error: 'A row identifier is required.', validation: { stage: validationStage, field: validationField, rule: validationRule } }, 400); }
+        if (!isDelete && (rowIssue || !validator(rowForValidation) || (currencyImageOmitted && (!body.baseRow || typeof body.baseImageDigest !== 'string')))) {
+          validationStage = 'target_row_validation'; validationField = rowIssue?.field ?? (currencyImageOmitted ? 'baseImageDigest' : '$'); validationRule = rowIssue?.rule ?? (currencyImageOmitted ? 'required_for_retained_image' : 'schema');
+          failureCategory = 'validation';
+          return respond({ error: 'The row did not pass validation.', validation: { stage: validationStage, field: validationField, rule: validationRule } }, 400);
+        }
+        if (body.baseRow !== null && (typeof body.baseRow !== 'object' || Array.isArray(body.baseRow))) { validationStage = 'request_validation'; validationField = 'baseRow'; validationRule = 'object_or_null'; failureCategory = 'validation'; return respond({ error: 'The row baseline is invalid.', validation: { stage: validationStage, field: validationField, rule: validationRule } }, 400); }
         const baseImageDigest = body.baseImageDigest === undefined || body.baseImageDigest === null ? null : typeof body.baseImageDigest === 'string' && /^[a-f0-9]{64}$/i.test(body.baseImageDigest) ? body.baseImageDigest : undefined;
-        if (body.baseImageDigest !== undefined && body.baseImageDigest !== null && !baseImageDigest) { failureCategory = 'validation'; return respond({ error: 'The image revision is invalid.' }, 400); }
+        if (body.baseImageDigest !== undefined && body.baseImageDigest !== null && !baseImageDigest) { validationStage = 'request_validation'; validationField = 'baseImageDigest'; validationRule = 'sha256_hex'; failureCategory = 'validation'; return respond({ error: 'The image revision is invalid.', validation: { stage: validationStage, field: validationField, rule: validationRule } }, 400); }
         saved = await mutateSharedDashboardRow({ key: rowKey, operation: isDelete ? 'delete' : 'upsert', id: rowId, row: body.row as never, baseRow: body.baseRow ?? null, baseImageDigest, expectedRevision, requestId });
       } else {
         if (!validator(body.value)) { failureCategory = 'validation'; return respond({ error: 'Shared data did not pass validation.' }, 400); }
@@ -188,9 +201,20 @@ export async function PUT(request: Request) {
     return respond({ success: true, ...saved });
   } catch (error) {
     const conflict = error instanceof SharedDashboardConflictError;
-    failureCategory = conflict ? 'revision_conflict' : 'database_or_network';
+    const mutationError = error instanceof SharedRowMutationError ? error : null;
+    if (mutationError) {
+      validationStage = mutationError.stage;
+      validationField = mutationError.field ?? null;
+      validationRule = mutationError.rule ?? null;
+      validationRecordIndex = mutationError.recordIndex ?? null;
+    }
+    failureCategory = conflict ? 'revision_conflict' : mutationError ? `validation_${mutationError.stage}` : 'database_or_network';
     const code = error && typeof error === 'object' && 'code' in error ? String((error as { code?: unknown }).code ?? '') : '';
     if (code === '42501') failureCategory = 'permission_denied';
-    return respond({ error: error instanceof Error ? error.message : 'Unable to save shared company data.' }, conflict ? 409 : 503);
+    const responseStatus = conflict ? 409 : mutationError?.status ?? 503;
+    return respond({
+      error: error instanceof Error ? error.message : 'Unable to save shared company data.',
+      ...(mutationError ? { validation: { stage: mutationError.stage, field: mutationError.field ?? null, rule: mutationError.rule ?? null, recordIndex: mutationError.recordIndex ?? null } } : {}),
+    }, responseStatus);
   }
 }

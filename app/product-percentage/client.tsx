@@ -7,7 +7,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { ArrowLeftRight, ChartNoAxesColumnIncreasing, Check, LayoutDashboard, LockKeyhole, LogOut, Pencil, Percent, ReceiptText, Share2, Store, UnlockKeyhole } from 'lucide-react';
 import { isStoredCurrencyRate, isStoredCurrencyRows, isStoredProductIncreases, isStoredSellingEntries, storageKeys, type CurrencyRateSnapshot, type CurrencyRow, type ProductIncrease, type SellingEntry } from '../../lib/storage';
 import { MobileFinanceNav } from '../../components/mobile-finance-nav';
-import { loadSharedDashboardValue, saveSharedDashboardRow } from '../../lib/shared-dashboard';
+import { loadSharedDashboardValue, readCachedSharedDashboardValue, reconcileSharedReferences, saveSharedDashboardRow } from '../../lib/shared-dashboard';
 import { shareProductWithImage } from '@/lib/product-share';
 import { fetchWithDataLoading } from '@/lib/data-fetch';
 
@@ -30,7 +30,7 @@ export default function ProductPercentagePage() {
     let active = true;
     const load = async <T,>(key: typeof storageKeys.currencyRows | typeof storageKeys.currencyRate | typeof storageKeys.productIncreases | typeof storageKeys.sellingEntries, validate: (value: unknown) => value is T, fallback: T): Promise<T> => {
       try { return await loadSharedDashboardValue(key, validate) ?? fallback; }
-      catch { if (active) setNotice('Shared company data is unavailable. Device data was preserved for recovery; reconnect before editing shared records.'); return fallback; }
+      catch { if (active) setNotice('Shared company data is unavailable. Device data was preserved for recovery; reconnect before editing shared records.'); return readCachedSharedDashboardValue(key, validate) ?? fallback; }
     };
     void (async () => {
       const [rows, savedRate, savedIncreases, savedSellingEntries] = await Promise.all([
@@ -40,7 +40,8 @@ export default function ProductPercentagePage() {
         load(storageKeys.sellingEntries, isStoredSellingEntries, [] as SellingEntry[]),
       ]);
       if (!active) return;
-      setSourceRows(rows); setRate(savedRate); setIncreases(savedIncreases); setSellingEntries(savedSellingEntries);
+      const safeRead = reconcileSharedReferences(rows, savedIncreases, savedSellingEntries, { rateAvailable: savedRate !== null });
+      setSourceRows(safeRead.rows); setRate(savedRate); setIncreases(safeRead.increases); setSellingEntries(safeRead.sales);
     })();
     return () => { active = false; };
   }, []);

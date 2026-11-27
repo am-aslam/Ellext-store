@@ -1,5 +1,8 @@
-import { isStoredCurrencyRate, isStoredCurrencyRows, isStoredProductIncreases, isStoredSellingEntries, readVersioned, storageKeys, writeVersioned, type CurrencyRow, type ProductIncrease, type SellingEntry } from './storage';
+import { getStoredRowValidationIssue, isStoredCurrencyRate, isStoredCurrencyRows, isStoredProductIncreases, isStoredSellingEntries, readVersioned, readVersionedRaw, storageKeys, writeVersioned, type CurrencyRow, type ProductIncrease, type SellingEntry, type SharedRowSnapshotKey } from './storage';
 import { fetchWithDataLoading } from './data-fetch';
+import { setSharedDataDiagnostics, type SharedDataDiagnostic } from './shared-data-diagnostics';
+
+export { getSharedDataDiagnostics } from './shared-data-diagnostics';
 
 export const sharedDashboardKeys = [
   storageKeys.currencyRows,
@@ -17,7 +20,89 @@ const MAX_SHARED_API_BODY_BYTES = 4 * 1024 * 1024;
 type SharedRowKey = typeof storageKeys.currencyRows | typeof storageKeys.productIncreases | typeof storageKeys.sellingEntries;
 type SharedRow = CurrencyRow | ProductIncrease | SellingEntry;
 
-export type DashboardOverview = { rows: CurrencyRow[]; increases: ProductIncrease[]; sales: SellingEntry[] };
+export type DashboardOverview = { rows: CurrencyRow[]; increases: ProductIncrease[]; sales: SellingEntry[]; validationIssues: SharedDataDiagnostic[] };
+
+function rowIdentity(key: SharedRowSnapshotKey, value: unknown): string | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const valueId = key === storageKeys.currencyRows ? record.id : record.sourceId;
+  return typeof valueId === 'string' ? valueId : null;
+}
+
+export function sanitizeSharedRowArray(key: SharedRowSnapshotKey, value: unknown): { value: unknown[]; issues: SharedDataDiagnostic[] } {
+  if (!Array.isArray(value)) throw new Error(`Shared snapshot structure failed validation for ${key}.`);
+  const issues: SharedDataDiagnostic[] = [];
+  const valid: { item: unknown; index: number }[] = [];
+  value.forEach((item, index) => {
+    const issue = getStoredRowValidationIssue(key, item);
+    if (issue) issues.push({ dataset: key, recordIndex: index, field: issue.field, rule: issue.rule, status: 'excluded_from_view_and_calculations' });
+    else valid.push({ item, index });
+  });
+  const idIndexes = new Map<string, number[]>();
+  valid.forEach(({ item, index }) => {
+    const id = rowIdentity(key, item);
+    if (id === null) return;
+    idIndexes.set(id, [...(idIndexes.get(id) ?? []), index]);
+  });
+  const duplicateIndexes = new Set<number>();
+  idIndexes.forEach(indexes => {
+    if (indexes.length < 2) return;
+    indexes.forEach(recordIndex => {
+      duplicateIndexes.add(recordIndex);
+      issues.push({ dataset: key, recordIndex, field: key === storageKeys.currencyRows ? 'id' : 'sourceId', rule: 'duplicate_identifier', status: 'excluded_from_view_and_calculations' });
+    });
+  });
+  setSharedDataDiagnostics(key, issues);
+  return { value: valid.filter(record => !duplicateIndexes.has(record.index)).map(record => record.item), issues };
+}
+
+/** Filter only invalid/ambiguous records for display and math; never writes these filtered arrays to the shared source. */
+export function reconcileSharedReferences(rows: CurrencyRow[], increases: ProductIncrease[], sales: SellingEntry[], options: { rateAvailable?: boolean; validatePrices?: boolean } = {}) {
+  const diagnostics: SharedDataDiagnostic[] = [];
+  const rowById = new Map(rows.map(row => [row.id, row]));
+  const eligibleIncreases = increases.filter((item, recordIndex) => {
+    if (rowById.has(item.sourceId)) return true;
+    diagnostics.push({ dataset: storageKeys.productIncreases, recordIndex, field: 'sourceId', rule: 'currency_row_reference_missing', status: 'excluded_from_financial_calculations' });
+    return false;
+  });
+  const eligibleSales = sales.filter((sale, recordIndex) => {
+    const product = rowById.get(sale.sourceId);
+    if (!product) {
+      diagnostics.push({ dataset: storageKeys.sellingEntries, recordIndex, field: 'sourceId', rule: 'currency_row_reference_missing', status: 'excluded_from_financial_calculations' });
+      return false;
+    }
+    const totalSold = sale.soldCount + (sale.retailerSoldCount ?? 0);
+    if (totalSold > product.productCount) {
+      diagnostics.push({ dataset: storageKeys.sellingEntries, recordIndex, field: 'soldCount', rule: 'combined_sold_count_exceeds_product_count', status: 'excluded_from_financial_calculations' });
+      return false;
+    }
+    if (options.validatePrices !== false && sale.soldCount > 0 && !eligibleIncreases.some(item => item.sourceId === sale.sourceId)) {
+      diagnostics.push({ dataset: storageKeys.productIncreases, recordIndex, field: 'increaseInr', rule: 'missing_selling_price_for_sold_units', status: 'financial_calculation_incomplete' });
+    }
+    if (options.validatePrices !== false && (sale.retailerSoldCount ?? 0) > 0 && sale.retailerAmountInr === undefined) {
+      diagnostics.push({ dataset: storageKeys.sellingEntries, recordIndex, field: 'retailerAmountInr', rule: 'missing_price_for_positive_retailer_sold_count', status: 'financial_calculation_incomplete' });
+    }
+    if (options.validatePrices !== false && options.rateAvailable === false && totalSold > 0) {
+      diagnostics.push({ dataset: storageKeys.currencyRate, recordIndex: null, field: 'usdToInr', rule: 'exchange_rate_unavailable_for_cost_calculation', status: 'financial_calculation_incomplete' });
+    }
+    return true;
+  });
+  setSharedDataDiagnostics('shared-references', diagnostics);
+  return { rows, increases: eligibleIncreases, sales: eligibleSales, diagnostics };
+}
+
+function prepareSharedValue(key: SharedDashboardKey, value: unknown, validate: (value: unknown) => boolean): { value: unknown; issues: SharedDataDiagnostic[] } {
+  if ([storageKeys.currencyRows, storageKeys.productIncreases, storageKeys.sellingEntries].includes(key as SharedRowSnapshotKey)) {
+    return sanitizeSharedRowArray(key as SharedRowSnapshotKey, value);
+  }
+  if (key === storageKeys.currencyRate && value !== null && value !== undefined && !validate(value)) {
+    const issues = [{ dataset: key, recordIndex: null, field: '$', rule: 'invalid_exchange_rate_snapshot', status: 'financial_calculation_incomplete' as const }];
+    setSharedDataDiagnostics(key, issues);
+    return { value: null, issues };
+  }
+  setSharedDataDiagnostics(key, []);
+  return { value, issues: [] };
+}
 
 /** Load a compact dashboard-only projection. Full product images remain in the shared snapshot. */
 export async function loadDashboardOverview(signal?: AbortSignal): Promise<DashboardOverview> {
@@ -34,15 +119,27 @@ export async function loadDashboardOverview(signal?: AbortSignal): Promise<Dashb
   const compactRows = result.snapshots[storageKeys.currencyRows]?.value;
   // This read intentionally excludes image blobs; provide the typed field the
   // dashboard expects without changing the real snapshot or browser cache.
-  const rowSnapshot = Array.isArray(compactRows)
+  const compactRowSnapshot = Array.isArray(compactRows)
     ? compactRows.map(row => typeof row === 'object' && row !== null && !Array.isArray(row) ? { ...row, image: '' } : row)
     : compactRows;
-  const increaseSnapshot = result.snapshots[storageKeys.productIncreases]?.value;
-  const salesSnapshot = result.snapshots[storageKeys.sellingEntries]?.value;
+  const rawIncreaseSnapshot = result.snapshots[storageKeys.productIncreases]?.value;
+  const rawSalesSnapshot = result.snapshots[storageKeys.sellingEntries]?.value;
+  const rowResult = sanitizeSharedRowArray(storageKeys.currencyRows, compactRowSnapshot);
+  const increaseResult = sanitizeSharedRowArray(storageKeys.productIncreases, rawIncreaseSnapshot);
+  const salesResult = sanitizeSharedRowArray(storageKeys.sellingEntries, rawSalesSnapshot);
+  const rowSnapshot = rowResult.value;
+  const increaseSnapshot = increaseResult.value;
+  const salesSnapshot = salesResult.value;
   if (!isStoredCurrencyRows(rowSnapshot) || !isStoredProductIncreases(increaseSnapshot) || !isStoredSellingEntries(salesSnapshot)) {
     throw new Error('Shared dashboard data failed validation.');
   }
-  return { rows: rowSnapshot, increases: increaseSnapshot, sales: salesSnapshot };
+  const reconciled = reconcileSharedReferences(rowSnapshot, increaseSnapshot, salesSnapshot);
+  return { ...reconciled, validationIssues: [
+    ...rowResult.issues,
+    ...increaseResult.issues,
+    ...salesResult.issues,
+    ...reconciled.diagnostics,
+  ] };
 }
 
 function preserveForRecovery(key: SharedDashboardKey, value: unknown) {
@@ -64,41 +161,49 @@ async function fetchSharedDashboardValue<T>(
   validate: (value: unknown) => value is T,
   signal?: AbortSignal,
 ): Promise<T | null> {
-  const cached = readVersioned(key, validate);
+  const rawCached = readVersionedRaw(key);
   let response: Response;
   try {
     response = await fetchWithDataLoading(`/api/shared-dashboard?key=${encodeURIComponent(key)}`, { cache: 'no-store', signal });
   } catch (error) {
-    if (cached !== null) preserveForRecovery(key, cached);
+    if (rawCached !== null) preserveForRecovery(key, rawCached);
     throw error;
   }
   const result = await response.json().catch(() => ({})) as { value?: unknown; revision?: string | null; error?: string };
   if (!response.ok) {
-    if (cached !== null) preserveForRecovery(key, cached);
+    if (rawCached !== null) preserveForRecovery(key, rawCached);
     throw new Error(result.error || 'Shared company data is unavailable.');
   }
   revisions.set(key, typeof result.revision === 'string' ? result.revision : null);
   if (result.value === null || result.value === undefined) {
-    if (cached !== null) {
-      preserveForRecovery(key, cached);
-      const hasLocalData = Array.isArray(cached) ? cached.length > 0 : cached !== null;
+    if (rawCached !== null) {
+      preserveForRecovery(key, rawCached);
+      const hasLocalData = Array.isArray(rawCached) ? rawCached.length > 0 : rawCached !== null;
       if (hasLocalData) throw new Error('No shared snapshot exists yet. This browser’s saved records were preserved for recovery and were not uploaded.');
     }
+    setSharedDataDiagnostics(key, []);
     return null;
   }
-  if (!validate(result.value)) {
-    if (cached !== null) preserveForRecovery(key, cached);
+  const prepared = prepareSharedValue(key, result.value, validate);
+  if (prepared.value === null && key === storageKeys.currencyRate && prepared.issues.length > 0) {
+    if (rawCached !== null) preserveForRecovery(key, rawCached);
+    return null;
+  }
+  if (!validate(prepared.value)) {
+    if (rawCached !== null) preserveForRecovery(key, rawCached);
     throw new Error('Shared company data failed validation.');
   }
   // An existing remote snapshot is authoritative. A stale tab-local snapshot
   // must never resurrect deleted rows or replace a newer server value. Keep a
   // recovery copy of non-empty divergent browser data before refreshing cache.
-  if (cached !== null && JSON.stringify(cached) !== JSON.stringify(result.value)) {
-    const hasLocalData = Array.isArray(cached) ? cached.length > 0 : cached !== null;
-    if (hasLocalData) preserveForRecovery(key, cached);
+  if (rawCached !== null && JSON.stringify(rawCached) !== JSON.stringify(prepared.value)) {
+    const hasLocalData = Array.isArray(rawCached) ? rawCached.length > 0 : rawCached !== null;
+    if (hasLocalData) preserveForRecovery(key, rawCached);
   }
-  writeVersioned(key, result.value);
-  return result.value;
+  // Do not replace a browser cache with a filtered view: the remote snapshot
+  // remains the source of record, and recovery/debug copies keep every row.
+  if (prepared.issues.length === 0) writeVersioned(key, prepared.value);
+  return prepared.value as T;
 }
 
 async function refreshSharedValueAfterConflict(key: SharedDashboardKey): Promise<void> {
@@ -125,6 +230,15 @@ export function loadSharedDashboardValue<T>(
   return request.finally(() => { if (sharedReadQueue.get(key) === request) sharedReadQueue.delete(key); });
 }
 
+/** Read a browser cache without rewriting it; row datasets are validated record by record. */
+export function readCachedSharedDashboardValue<T>(key: SharedDashboardKey, validate: (value: unknown) => value is T): T | null {
+  const raw = readVersionedRaw(key);
+  if (raw === null) return null;
+  const prepared = prepareSharedValue(key, raw, validate);
+  if (!validate(prepared.value)) return null;
+  return prepared.value;
+}
+
 export async function loadSharedDashboardValues(
   validators: Partial<Record<SharedDashboardKey, (value: unknown) => value is unknown>>,
   signal?: AbortSignal,
@@ -139,12 +253,12 @@ export async function loadSharedDashboardValues(
     try {
       response = await fetchWithDataLoading(`/api/shared-dashboard?keys=${keys.map(encodeURIComponent).join(',')}&attempt=${retryCount}`, { cache: 'no-store', signal });
     } catch (error) {
-      for (const key of keys) { const validate = validators[key]; if (validate) { const cached = readVersioned(key, validate); if (cached !== null) preserveForRecovery(key, cached); } }
+      for (const key of keys) { const cached = readVersionedRaw(key); if (cached !== null) preserveForRecovery(key, cached); }
       throw error;
     }
     const result = await response.json().catch(() => ({})) as { snapshots?: Record<string, { value?: unknown; revision?: string | null }>; error?: string };
     if (!response.ok || !result.snapshots) {
-      for (const key of keys) { const validate = validators[key]; if (validate) { const cached = readVersioned(key, validate); if (cached !== null) preserveForRecovery(key, cached); } }
+      for (const key of keys) { const cached = readVersionedRaw(key); if (cached !== null) preserveForRecovery(key, cached); }
       const requestId = response.headers.get('x-request-id') || (result as { requestId?: string }).requestId;
       throw new Error(`${result.error || 'Shared company data is unavailable.'}${requestId ? ` (request ${requestId})` : ''}`);
     }
@@ -154,25 +268,32 @@ export async function loadSharedDashboardValues(
       const snapshot = result.snapshots[key];
       if (!validate || !snapshot) throw new Error(`Shared data response did not include ${key}.`);
       revisions.set(key, typeof snapshot.revision === 'string' ? snapshot.revision : null);
-      const cached = readVersioned(key, validate);
+      const rawCached = readVersionedRaw(key);
       if (snapshot.value === null || snapshot.value === undefined) {
-        if (cached !== null) {
-          preserveForRecovery(key, cached);
-          if (Array.isArray(cached) ? cached.length > 0 : cached !== null) throw new Error('No shared snapshot exists yet. This browser’s saved records were preserved for recovery and were not uploaded.');
+        if (rawCached !== null) {
+          preserveForRecovery(key, rawCached);
+          if (Array.isArray(rawCached) ? rawCached.length > 0 : rawCached !== null) throw new Error('No shared snapshot exists yet. This browser’s saved records were preserved for recovery and were not uploaded.');
         }
+        setSharedDataDiagnostics(key, []);
         values[key] = null;
         continue;
       }
-      if (!validate(snapshot.value)) {
-        if (cached !== null) preserveForRecovery(key, cached);
+      const prepared = prepareSharedValue(key, snapshot.value, validate);
+      if (prepared.value === null && key === storageKeys.currencyRate && prepared.issues.length > 0) {
+        if (rawCached !== null) preserveForRecovery(key, rawCached);
+        values[key] = null;
+        continue;
+      }
+      if (!validate(prepared.value)) {
+        if (rawCached !== null) preserveForRecovery(key, rawCached);
         throw new Error(`Shared company data failed validation for ${key}.`);
       }
-      if (cached !== null && JSON.stringify(cached) !== JSON.stringify(snapshot.value)) {
-        const hasLocalData = Array.isArray(cached) ? cached.length > 0 : cached !== null;
-        if (hasLocalData) preserveForRecovery(key, cached);
+      if (rawCached !== null && JSON.stringify(rawCached) !== JSON.stringify(prepared.value)) {
+        const hasLocalData = Array.isArray(rawCached) ? rawCached.length > 0 : rawCached !== null;
+        if (hasLocalData) preserveForRecovery(key, rawCached);
       }
-      writeVersioned(key, snapshot.value);
-      values[key] = snapshot.value;
+      if (prepared.issues.length === 0) writeVersioned(key, prepared.value);
+      values[key] = prepared.value;
     }
     return values;
   })();
@@ -249,8 +370,8 @@ function sharedRowValidator(key: SharedRowKey): (value: unknown) => value is Sha
 }
 function mergeRowCache(key: SharedRowKey, row: SharedRow, deleting = false) {
   const id = key === storageKeys.currencyRows ? (row as CurrencyRow).id : (row as ProductIncrease | SellingEntry).sourceId;
-  const validator = sharedRowValidator(key);
-  const cached = readVersioned(key, validator) ?? [];
+  const cached = readVersionedRaw(key);
+  if (!Array.isArray(cached)) return;
   const next = deleting
     ? cached.filter(item => (key === storageKeys.currencyRows ? (item as CurrencyRow).id : (item as ProductIncrease | SellingEntry).sourceId) !== id)
     : [...cached.filter(item => (key === storageKeys.currencyRows ? (item as CurrencyRow).id : (item as ProductIncrease | SellingEntry).sourceId) !== id), row];

@@ -7,7 +7,7 @@ import { ArrowLeftRight, ChartNoAxesColumnIncreasing, Check, Image as ImageIcon,
 import { BrandLogo } from '@/components/brand-logo';
 import { MobileFinanceNav } from '@/components/mobile-finance-nav';
 import { isStoredCurrencyRows, isStoredSellingEntries, storageKeys, type CurrencyRow, type SellingEntry } from '@/lib/storage';
-import { loadSharedDashboardValues, saveSharedDashboardRow } from '@/lib/shared-dashboard';
+import { loadSharedDashboardValues, readCachedSharedDashboardValue, reconcileSharedReferences, saveSharedDashboardRow } from '@/lib/shared-dashboard';
 import { shareProductWithImage } from '@/lib/product-share';
 import { fetchWithDataLoading } from '@/lib/data-fetch';
 
@@ -42,10 +42,11 @@ export default function EllextRetailersClient() {
       if (!active) return;
       const productSnapshot: unknown = snapshots[storageKeys.currencyRows];
       const entrySnapshot: unknown = snapshots[storageKeys.sellingEntries];
-      const savedProducts: CurrencyRow[] = isStoredCurrencyRows(productSnapshot) ? productSnapshot : [];
-      const savedEntries: SellingEntry[] = isStoredSellingEntries(entrySnapshot) ? entrySnapshot : [];
-      const productRows = savedProducts ?? [];
-      const sales = savedEntries ?? [];
+      const savedProducts: CurrencyRow[] = isStoredCurrencyRows(productSnapshot) ? productSnapshot : readCachedSharedDashboardValue(storageKeys.currencyRows, isStoredCurrencyRows) ?? [];
+      const savedEntries: SellingEntry[] = isStoredSellingEntries(entrySnapshot) ? entrySnapshot : readCachedSharedDashboardValue(storageKeys.sellingEntries, isStoredSellingEntries) ?? [];
+      const safeRead = reconcileSharedReferences(savedProducts ?? [], [], savedEntries ?? [], { validatePrices: false });
+      const productRows = safeRead.rows;
+      const sales = safeRead.sales;
       setProducts(productRows);
       setEntries(sales);
       setHasLoadedSharedData(true);
@@ -54,7 +55,17 @@ export default function EllextRetailersClient() {
         return [row.id, { amount: saved?.retailerAmountInr === undefined ? '' : String(saved.retailerAmountInr), sold: saved?.retailerSoldCount === undefined ? '' : String(saved.retailerSoldCount) }];
       })));
     }).catch(error => {
-      if (active) setLoadError(error instanceof Error ? `Shared data could not be loaded: ${error.name === 'AbortError' ? 'the server did not respond within 8.5 seconds.' : error.message}` : 'Shared data could not be loaded.');
+      if (!active) return;
+      const savedProducts = readCachedSharedDashboardValue(storageKeys.currencyRows, isStoredCurrencyRows) ?? [];
+      const savedEntries = readCachedSharedDashboardValue(storageKeys.sellingEntries, isStoredSellingEntries) ?? [];
+      const safeRead = reconcileSharedReferences(savedProducts, [], savedEntries, { validatePrices: false });
+      setProducts(safeRead.rows);
+      setEntries(safeRead.sales);
+      setDrafts(Object.fromEntries(safeRead.rows.map(row => {
+        const saved = safeRead.sales.find(entry => entry.sourceId === row.id);
+        return [row.id, { amount: saved?.retailerAmountInr === undefined ? '' : String(saved.retailerAmountInr), sold: saved?.retailerSoldCount === undefined ? '' : String(saved.retailerSoldCount) }];
+      })));
+      setLoadError(error instanceof Error ? `Shared data could not be loaded: ${error.name === 'AbortError' ? 'the server did not respond within 8.5 seconds.' : error.message} Showing validated browser cache only.` : 'Shared data could not be loaded. Showing validated browser cache only.');
     }).finally(() => { window.clearTimeout(timeout); if (active) setLoading(false); });
     return () => { active = false; window.clearTimeout(timeout); };
   }, [reload]);
@@ -65,8 +76,9 @@ export default function EllextRetailersClient() {
     const entry = entryMap.get(row.id);
     const count = entry?.retailerSoldCount ?? 0;
     const amount = entry?.retailerAmountInr ?? 0;
-    return { count: sum.count + count, collected: sum.collected + count * amount };
-  }, { count: 0, collected: 0 }), [rows, entryMap]);
+    const missingPrice = count > 0 && entry?.retailerAmountInr === undefined;
+    return { count: sum.count + count, collected: sum.collected + count * amount, complete: sum.complete && !missingPrice };
+  }, { count: 0, collected: 0, complete: true }), [rows, entryMap]);
 
   const saveRetailerField = async (row: CurrencyRow, field: 'amount' | 'sold') => {
     const draft = drafts[row.id] ?? { amount: '', sold: '0' };
@@ -157,7 +169,7 @@ export default function EllextRetailersClient() {
       <Link className="nav-link" href="/"><LayoutDashboard size={19}/><span>Dashboard</span></Link><Link className="nav-link" href="/currency-exchange"><ArrowLeftRight size={19}/><span>Currency Exchange</span></Link><Link className="nav-link" href="/product-percentage"><Percent size={19}/><span>Product Percentage</span></Link><Link className="nav-link" href="/selling-details"><ChartNoAxesColumnIncreasing size={19}/><span>Selling Details</span></Link><Link className="nav-link selected" href="/ellext-retailers"><Store size={19}/><span>Retailers</span></Link><Link className="nav-link" href="/expense-ledger"><ReceiptText size={19}/><span>Expense Ledger</span></Link>
     </nav><div className="currency-sidebar-note"><span className="currency-rate-icon"><Store size={18}/></span><span>RETAILER SALES<br/><b>{totals.count.toLocaleString('en-IN')} items</b></span></div><button className="logout currency-logout" onClick={signOut}><LogOut size={17}/> Sign out</button></aside>
     <section className="main-panel currency-main retailers-main"><header className="currency-header"><div><div className="finance-mobile-topline"><MobileFinanceNav active="/ellext-retailers"/><Link href="/" className="currency-mobile-home"><BrandLogo /></Link></div><span className="currency-kicker">ELLEXTSTORE · RETAIL PARTNERS</span><h1>Retailers</h1><p>Set retailer pricing and track retailer sales separately.</p></div><Link href="/currency-exchange" className="currency-add"><ArrowLeftRight size={16}/> Currency exchange</Link></header>
-      <section className="selling-summary retailers-summary"><article><span>RETAILER ITEMS SOLD</span><strong>{totals.count.toLocaleString('en-IN')}</strong><small>Tracked separately from direct sales</small></article><article><span>RETAILER COLLECTION</span><strong>{money(totals.collected)}</strong><small>Retailer amount × retailer sold count</small></article></section>
+      <section className="selling-summary retailers-summary"><article><span>RETAILER ITEMS SOLD</span><strong>{totals.count.toLocaleString('en-IN')}</strong><small>Tracked separately from direct sales</small></article><article><span>RETAILER COLLECTION</span><strong>{totals.complete ? money(totals.collected) : '—'}</strong><small>{totals.complete ? 'Retailer amount × retailer sold count' : 'Unavailable: a sold record has no valid retailer amount'}</small></article></section>
       <div className="currency-table-heading"><div><h2>Retailer product rows</h2><p>{rows.length} active product {rows.length === 1 ? 'row' : 'rows'} from Currency Exchange</p></div></div>
       {loading && !hasLoadedSharedData ? <div className="currency-empty"><strong>Loading shared retailer data…</strong></div> : loadError && rows.length === 0 ? <div className="currency-empty retailer-load-error" role="alert"><strong>Retailer data could not be loaded</strong><p>{loadError}</p><button className="currency-empty-link" onClick={() => setReload(value => value + 1)}>Try again</button></div> : rows.length ? <>{loadError && <div className="retailer-inline-error" role="status"><span>Previously loaded shared retailer data remains visible. Refresh failed: {loadError}</span><button onClick={() => setReload(value => value + 1)}>Retry</button></div>}<div className="currency-table-wrap retailer-desktop-table"><table className="currency-table retailer-table"><thead><tr><th>Date</th><th>Image</th><th>Description</th><th>Retailer amount</th><th>Product count</th><th>Retailer sold</th><th>Collected amount</th><th>Actions</th></tr></thead><tbody>{rows.map(row => {
         const entry = entryMap.get(row.id); const draft = drafts[row.id] ?? { amount: '', sold: '0' }; const sold = entry?.retailerSoldCount ?? 0; const amount = entry?.retailerAmountInr ?? 0; const collected = sold * amount; const available = Math.max(0, row.productCount - (entry?.soldCount ?? 0));

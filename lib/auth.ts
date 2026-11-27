@@ -9,7 +9,9 @@ import { mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { cookies } from 'next/headers';
-import { isStoredCurrencyRows, isStoredProductIncreases, isStoredSellingEntries, storageKeys, type CurrencyRow, type ProductIncrease, type SellingEntry } from '@/lib/storage';
+import { storageKeys, type SharedRowSnapshotKey } from '@/lib/storage';
+import { mutateSharedRowWithStore, reconcileAmbiguousSnapshotWrite, SharedDashboardConflictError, type SharedRowOperation } from '@/lib/shared-row-mutation';
+export { SharedDashboardConflictError } from '@/lib/shared-row-mutation';
 
 export type UserRole = 'super_admin' | 'admin';
 export type AppUser = { id: string; email: string; name: string; role: UserRole };
@@ -255,7 +257,6 @@ async function ensureSharedDashboardTable(pool: Pool): Promise<boolean> {
 }
 
 type SharedDashboardSnapshot = { value: unknown | null; revision: string | null; storageMode: StorageMode };
-export class SharedDashboardConflictError extends Error {}
 
 function readLocalSharedDashboardValue(storageKey: string): { value: unknown; revision: string } | null {
   const record = db().prepare('SELECT payload,updated_at FROM dashboard_shared_state WHERE storage_key=?').get(storageKey) as { payload: string; updated_at: string } | undefined;
@@ -493,14 +494,19 @@ export async function writeSharedDashboardValue(storageKey: string, payload: unk
       // This is read-only and never retries or overwrites a newer revision.
       if (isAmbiguousTransportFailure(error)) {
         try {
-          const { data: current, error: readError } = await client.from('dashboard_shared_state')
-            .select('payload,updated_at').eq('storage_key', storageKey).maybeSingle();
-          if (!readError && current && JSON.stringify(current.payload) === serialized) {
-            console.info(JSON.stringify({ event: 'shared_dashboard_write', requestId: requestId ?? null, provider: 'supabase-rest', key: storageKey, operation, expectedRevision, revision: current.updated_at, payloadBytes: Buffer.byteLength(serialized), durationMs: Math.round(performance.now() - startedAt), status: 'confirmed_after_ambiguous_response' }));
-            return { storageMode, revision: current.updated_at };
-          }
-          if (!readError && current && expectedRevision !== null && current.updated_at !== expectedRevision) {
-            throw new SharedDashboardConflictError('Shared data changed while the save response was interrupted. The current server version was kept; refresh before retrying.');
+          const reconciled = await reconcileAmbiguousSnapshotWrite({
+            serializedPayload: serialized,
+            expectedRevision,
+            readCurrent: async () => {
+              const { data: current, error: readError } = await client.from('dashboard_shared_state')
+                .select('payload,updated_at').eq('storage_key', storageKey).maybeSingle();
+              if (readError || !current) return null;
+              return { payload: current.payload, revision: current.updated_at };
+            },
+          });
+          if (reconciled) {
+            console.info(JSON.stringify({ event: 'shared_dashboard_write', requestId: requestId ?? null, provider: 'supabase-rest', key: storageKey, operation, expectedRevision, revision: reconciled.revision, payloadBytes: Buffer.byteLength(serialized), recordCount: Array.isArray(payload) ? payload.length : null, durationMs: Math.round(performance.now() - startedAt), status: 'confirmed_after_ambiguous_response' }));
+            return { storageMode, revision: reconciled.revision };
           }
         } catch (reconciliationError) {
           if (reconciliationError instanceof SharedDashboardConflictError) throw reconciliationError;
@@ -520,33 +526,9 @@ export async function writeSharedDashboardValue(storageKey: string, payload: unk
   return { storageMode, revision };
 }
 
-type SharedRowKey = typeof storageKeys.currencyRows | typeof storageKeys.productIncreases | typeof storageKeys.sellingEntries;
-type SharedRow = CurrencyRow | ProductIncrease | SellingEntry;
-type SharedRowOperation = 'upsert' | 'delete';
-const sharedRowValidators: Record<SharedRowKey, (value: unknown) => boolean> = {
-  [storageKeys.currencyRows]: value => isStoredCurrencyRows([value]),
-  [storageKeys.productIncreases]: value => isStoredProductIncreases([value]),
-  [storageKeys.sellingEntries]: value => isStoredSellingEntries([value]),
-};
-
-function canonicalJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
-  if (value && typeof value === 'object') {
-    const record = value as Record<string, unknown>;
-    return `{${Object.keys(record).sort().map(key => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(',')}}`;
-  }
-  return JSON.stringify(value);
-}
-function rowIdentity(key: SharedRowKey, value: unknown): string | null {
-  if (!value || typeof value !== 'object') return null;
-  const record = value as Record<string, unknown>;
-  const identity = key === storageKeys.currencyRows ? record.id : record.sourceId;
-  return typeof identity === 'string' ? identity : null;
-}
-
-/** Apply one authenticated, validated row delta with snapshot and row-level CAS. */
+/** Apply one authenticated row delta, retaining unrelated legacy rows verbatim. */
 export async function mutateSharedDashboardRow(input: {
-  key: SharedRowKey;
+  key: SharedRowSnapshotKey;
   operation: SharedRowOperation;
   id: string;
   row?: unknown;
@@ -554,66 +536,21 @@ export async function mutateSharedDashboardRow(input: {
   baseImageDigest?: string | null;
   expectedRevision: string | null;
   requestId?: string;
-}): Promise<{ storageMode: StorageMode; revision: string; merged: boolean }> {
+}): Promise<{ storageMode: StorageMode; revision: string; merged: boolean; attempts: number; preservedLegacyRecordCount: number; snapshotBytes: number; recordCount: number }> {
   const { key, operation, id, row, baseRow, expectedRevision, requestId } = input;
-  if (!id.trim()) throw new Error('A row identifier is required.');
-  if (operation === 'upsert' && (!row || rowIdentity(key, row) !== id)) {
-    throw new Error('The row did not pass validation.');
-  }
   const startedAt = performance.now();
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const current = await readSharedDashboardValue(key, requestId);
-    const records = current.value ?? [];
-    if (!sharedRowValidators[key](records)) throw new Error('The shared snapshot failed validation. No rows were changed.');
-    const currentRows = records as SharedRow[];
-    const matches = currentRows.filter(item => rowIdentity(key, item) === id);
-    if (matches.length > 1) throw new Error('The shared snapshot contains duplicate row identifiers. No rows were changed.');
-    const existing = matches[0];
-    let candidateRow: SharedRow | null = null;
-    if (operation === 'upsert') {
-      if (key === storageKeys.currencyRows && row && typeof row === 'object' && !Array.isArray(row) && !Object.hasOwn(row, 'image')) {
-        if (!existing) throw new Error('A new currency row must include its product image.');
-        candidateRow = { ...existing, ...(row as Record<string, unknown>), image: (existing as CurrencyRow).image } as CurrencyRow;
-      } else {
-        candidateRow = row as SharedRow;
-      }
-      if (!sharedRowValidators[key](candidateRow)) throw new Error('The row did not pass validation.');
-    }
-
-    if (operation === 'upsert' && existing && canonicalJson(existing) === canonicalJson(candidateRow)) {
-      if (!current.revision) throw new Error('The saved row has no valid shared revision. Refresh before retrying.');
-      console.info(JSON.stringify({ event: 'shared_dashboard_row_write', requestId: requestId ?? null, key, operation, payloadBytes: Buffer.byteLength(JSON.stringify({ key, operation, id, row, expectedRevision })), durationMs: Math.round(performance.now() - startedAt), attempts: attempt + 1, status: 'already_committed', revision: current.revision }));
-      return { storageMode: current.storageMode, revision: current.revision, merged: current.revision !== expectedRevision };
-    }
-    if (operation === 'delete' && !existing) {
-      if (!current.revision) throw new Error('The shared row is unavailable. Refresh before retrying.');
-      return { storageMode: current.storageMode, revision: current.revision, merged: current.revision !== expectedRevision };
-    }
-
-    let baseMatches = baseRow === null ? !existing : Boolean(existing && canonicalJson(existing) === canonicalJson(baseRow));
-    if (key === storageKeys.currencyRows && existing && baseRow && input.baseImageDigest) {
-      const { image: _image, ...currentWithoutImage } = existing as CurrencyRow;
-      baseMatches = canonicalJson(currentWithoutImage) === canonicalJson(baseRow)
-        && createHash('sha256').update((existing as CurrencyRow).image).digest('hex') === input.baseImageDigest;
-    }
-    if (!baseMatches) throw new SharedDashboardConflictError('This product row changed in another session. The newer shared row was kept; refresh before retrying your saved draft.');
-
-    const nextRows = operation === 'delete'
-      ? currentRows.filter(item => rowIdentity(key, item) !== id)
-      : existing
-        ? currentRows.map(item => rowIdentity(key, item) === id ? candidateRow! : item)
-        : [...currentRows, candidateRow!];
-    if (!sharedRowValidators[key](nextRows)) throw new Error('The updated shared snapshot failed validation. No rows were changed.');
-    try {
-      const saved = await writeSharedDashboardValue(key, nextRows, current.revision, requestId);
-      const merged = current.revision !== expectedRevision;
-      console.info(JSON.stringify({ event: 'shared_dashboard_row_write', requestId: requestId ?? null, key, operation, payloadBytes: Buffer.byteLength(JSON.stringify({ key, operation, id, row, expectedRevision })), snapshotBytes: Buffer.byteLength(JSON.stringify(nextRows)), recordCount: nextRows.length, durationMs: Math.round(performance.now() - startedAt), attempts: attempt + 1, status: 'committed', merged, revision: saved.revision }));
-      return { ...saved, merged };
-    } catch (error) {
-      if (!(error instanceof SharedDashboardConflictError) || attempt === 2) throw error;
-    }
-  }
-  throw new SharedDashboardConflictError('Shared data changed repeatedly while saving. Your draft is preserved; refresh before retrying.');
+  const result = await mutateSharedRowWithStore(input, {
+    read: (storageKey, idForLog) => readSharedDashboardValue(storageKey, idForLog),
+    write: (storageKey, rows, revision, idForLog) => writeSharedDashboardValue(storageKey, rows, revision, idForLog),
+  });
+  const inputBytes = Buffer.byteLength(JSON.stringify({ key, operation, id, row, baseRow, expectedRevision }));
+  console.info(JSON.stringify({
+    event: 'shared_dashboard_row_write', requestId: requestId ?? null, key, operation,
+    payloadBytes: inputBytes, snapshotBytes: result.snapshotBytes, recordCount: result.recordCount,
+    preservedLegacyRecordCount: result.preservedLegacyRecordCount, durationMs: Math.round(performance.now() - startedAt),
+    attempts: result.attempts, status: 'committed', merged: result.merged, revision: result.revision,
+  }));
+  return result;
 }
 
 

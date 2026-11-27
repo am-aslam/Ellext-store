@@ -1,5 +1,6 @@
 import type { Metadata } from 'next';
 import { GlobalDataLoading } from '@/components/global-data-loading';
+import { SharedDataValidationBanner } from '@/components/shared-data-validation-banner';
 import './globals.css';
 
 export const metadata: Metadata = {
@@ -9,5 +10,5 @@ export const metadata: Metadata = {
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
-  return <html lang="en"><body>{children}<GlobalDataLoading /></body></html>;
+  return <html lang="en"><body>{children}<SharedDataValidationBanner /><GlobalDataLoading /></body></html>;
 }
