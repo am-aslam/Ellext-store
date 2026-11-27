@@ -271,6 +271,12 @@ function sharedDashboardApiError(action: string, error: { message: string; code?
   return new Error(`Unable to ${action} shared dashboard data: ${error.message}`);
 }
 
+function isAmbiguousTransportFailure(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return error.name === 'TimeoutError' || error.name === 'AbortError'
+    || /fetch failed|network|timed? out|aborted|connection terminated/i.test(error.message);
+}
+
 export type SupabaseDiagnostics = {
   auth: 'connected' | 'failed' | 'not_configured';
   restApi: 'connected' | 'failed' | 'not_configured';
@@ -458,22 +464,51 @@ export async function readSharedDashboardOverview(requestId?: string): Promise<R
   return snapshots;
 }
 
-export async function writeSharedDashboardValue(storageKey: string, payload: unknown, expectedRevision: string | null): Promise<{ storageMode: StorageMode; revision: string }> {
+export async function writeSharedDashboardValue(storageKey: string, payload: unknown, expectedRevision: string | null, requestId?: string): Promise<{ storageMode: StorageMode; revision: string }> {
   const serialized = JSON.stringify(payload);
   const storageMode = await getCompanyDataStorageMode();
   const revision = new Date().toISOString();
+  const startedAt = performance.now();
+  const operation = expectedRevision === null ? 'insert' : 'conditional_update';
   if (storageMode === 'supabase') {
     const client = getSupabaseAdmin();
     if (!client) throw new Error('Supabase service key is not configured.');
-    const query = expectedRevision === null
-      ? client.from('dashboard_shared_state').insert({ storage_key: storageKey, payload, updated_at: revision }).select('updated_at').maybeSingle()
-      : client.from('dashboard_shared_state').update({ payload, updated_at: revision }).eq('storage_key', storageKey).eq('updated_at', expectedRevision).select('updated_at').maybeSingle();
-    const { data, error } = await query;
-    if (error?.code === '23505') throw new SharedDashboardConflictError('Shared data changed in another session. Refresh this page and retry your edit.');
-    if (error) throw sharedDashboardApiError('save', error);
-    if (!data) throw new SharedDashboardConflictError('Shared data changed in another session. Refresh this page and retry your edit.');
-    const savedRevision = data.updated_at;
-    return { storageMode, revision: savedRevision };
+    try {
+      const query = expectedRevision === null
+        ? client.from('dashboard_shared_state').insert({ storage_key: storageKey, payload, updated_at: revision }).select('updated_at').maybeSingle()
+        : client.from('dashboard_shared_state').update({ payload, updated_at: revision }).eq('storage_key', storageKey).eq('updated_at', expectedRevision).select('updated_at').maybeSingle();
+      const { data, error } = await query;
+      if (error?.code === '23505') throw new SharedDashboardConflictError('Shared data changed in another session. Refresh this page and retry your edit.');
+      if (error) throw sharedDashboardApiError('save', error);
+      if (!data) throw new SharedDashboardConflictError('Shared data changed in another session. Refresh this page and retry your edit.');
+      const savedRevision = data.updated_at;
+      console.info(JSON.stringify({ event: 'shared_dashboard_write', requestId: requestId ?? null, provider: 'supabase-rest', key: storageKey, operation, expectedRevision, revision: savedRevision, payloadBytes: Buffer.byteLength(serialized), durationMs: Math.round(performance.now() - startedAt), status: 'committed' }));
+      return { storageMode, revision: savedRevision };
+    } catch (error) {
+      // A timed-out HTTP response does not prove that PostgREST rolled back.
+      // Read the authoritative row before telling the user the write failed.
+      // This is read-only and never retries or overwrites a newer revision.
+      if (isAmbiguousTransportFailure(error)) {
+        try {
+          const { data: current, error: readError } = await client.from('dashboard_shared_state')
+            .select('payload,updated_at').eq('storage_key', storageKey).maybeSingle();
+          if (!readError && current && JSON.stringify(current.payload) === serialized) {
+            console.info(JSON.stringify({ event: 'shared_dashboard_write', requestId: requestId ?? null, provider: 'supabase-rest', key: storageKey, operation, expectedRevision, revision: current.updated_at, payloadBytes: Buffer.byteLength(serialized), durationMs: Math.round(performance.now() - startedAt), status: 'confirmed_after_ambiguous_response' }));
+            return { storageMode, revision: current.updated_at };
+          }
+          if (!readError && current && expectedRevision !== null && current.updated_at !== expectedRevision) {
+            throw new SharedDashboardConflictError('Shared data changed while the save response was interrupted. The current server version was kept; refresh before retrying.');
+          }
+        } catch (reconciliationError) {
+          if (reconciliationError instanceof SharedDashboardConflictError) throw reconciliationError;
+          // Keep the original write error if the verification read is also unavailable.
+        }
+      }
+      const code = error && typeof error === 'object' && 'code' in error ? String((error as { code?: unknown }).code ?? '') : '';
+      const status = error instanceof SharedDashboardConflictError ? 'conflict' : 'error';
+      console.error(JSON.stringify({ event: 'shared_dashboard_write', requestId: requestId ?? null, provider: 'supabase-rest', key: storageKey, operation, expectedRevision, payloadBytes: Buffer.byteLength(serialized), durationMs: Math.round(performance.now() - startedAt), status, code: code || null, category: error instanceof Error && error.name === 'TimeoutError' ? 'timeout' : code === '42501' ? 'permission_denied' : code === '23505' ? 'duplicate_revision' : 'request_failed' }));
+      throw error;
+    }
   }
   const localResult = expectedRevision === null
     ? db().prepare(`INSERT INTO dashboard_shared_state(storage_key,payload,updated_at) VALUES(?,?,?) ON CONFLICT(storage_key) DO NOTHING`).run(storageKey, serialized, revision)

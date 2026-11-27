@@ -69,22 +69,56 @@ export async function GET(request: Request) {
 }
 
 export async function PUT(request: Request) {
+  const requestId = randomUUID();
+  const startedAt = performance.now();
+  let authDurationMs = 0;
+  let parseDurationMs = 0;
+  let writeDurationMs = 0;
+  let payloadBytes = 0;
+  let key = '';
+  let status = 200;
+  let failureCategory: string | null = null;
+  let expectedRevision: string | null = null;
+  let storageMode: string | null = null;
+  let userRole: string | null = null;
+  const respond = (body: Record<string, unknown>, responseStatus = 200) => {
+    status = responseStatus;
+    const log = { event: 'shared_dashboard_api', requestId, method: 'PUT', endpoint: '/api/shared-dashboard', durationMs: Math.round(performance.now() - startedAt), authDurationMs, parseDurationMs, writeDurationMs, payloadBytes, key: key || null, expectedRevision, storageMode, role: userRole, status, failureCategory };
+    (status >= 500 ? console.error : console.info)(JSON.stringify(log));
+    return NextResponse.json({ ...body, requestId }, { status, headers: { 'x-request-id': requestId } });
+  };
+  const authStartedAt = performance.now();
   const user = await getCurrentUser();
-  if (!user) return NextResponse.json({ error: 'Sign in to update shared company data.' }, { status: 401 });
+  authDurationMs = Math.round(performance.now() - authStartedAt);
+  if (!user) { failureCategory = 'unauthorized'; return respond({ error: 'Sign in to update shared company data.' }, 401); }
+  userRole = user.role;
   try {
-    const body = await request.json() as { key?: unknown; value?: unknown; revision?: unknown };
-    const key = typeof body.key === 'string' ? body.key : '';
+    const parseStartedAt = performance.now();
+    const rawBody = await request.text();
+    payloadBytes = Buffer.byteLength(rawBody);
+    let body: { key?: unknown; value?: unknown; revision?: unknown };
+    try { body = JSON.parse(rawBody) as typeof body; }
+    catch { parseDurationMs = Math.round(performance.now() - parseStartedAt); failureCategory = 'invalid_json'; return respond({ error: 'Request body must be valid JSON.' }, 400); }
+    parseDurationMs = Math.round(performance.now() - parseStartedAt);
+    key = typeof body.key === 'string' ? body.key : '';
     const validator = validators[key];
-    if (!validator) return NextResponse.json({ error: 'Unknown shared data key.' }, { status: 400 });
-    if (!validator(body.value)) return NextResponse.json({ error: 'Shared data did not pass validation.' }, { status: 400 });
+    if (!validator) { failureCategory = 'invalid_key'; return respond({ error: 'Unknown shared data key.' }, 400); }
+    if (!validator(body.value)) { failureCategory = 'validation'; return respond({ error: 'Shared data did not pass validation.' }, 400); }
     if (body.revision !== undefined && body.revision !== null && (typeof body.revision !== 'string' || !Number.isFinite(Date.parse(body.revision)))) {
-      return NextResponse.json({ error: 'Shared data revision is invalid. Refresh the page and retry.' }, { status: 400 });
+      failureCategory = 'invalid_revision'; return respond({ error: 'Shared data revision is invalid. Refresh the page and retry.' }, 400);
     }
-    const expectedRevision = typeof body.revision === 'string' ? body.revision : null;
-    const saved = await writeSharedDashboardValue(key, body.value, expectedRevision);
-    return NextResponse.json({ success: true, ...saved });
+    expectedRevision = typeof body.revision === 'string' ? body.revision : null;
+    const writeStartedAt = performance.now();
+    let saved: Awaited<ReturnType<typeof writeSharedDashboardValue>>;
+    try { saved = await writeSharedDashboardValue(key, body.value, expectedRevision, requestId); }
+    finally { writeDurationMs = Math.round(performance.now() - writeStartedAt); }
+    storageMode = saved.storageMode;
+    return respond({ success: true, ...saved });
   } catch (error) {
     const conflict = error instanceof SharedDashboardConflictError;
-    return NextResponse.json({ error: error instanceof Error ? error.message : 'Unable to save shared company data.' }, { status: conflict ? 409 : 503 });
+    failureCategory = conflict ? 'revision_conflict' : 'database_or_network';
+    const code = error && typeof error === 'object' && 'code' in error ? String((error as { code?: unknown }).code ?? '') : '';
+    if (code === '42501') failureCategory = 'permission_denied';
+    return respond({ error: error instanceof Error ? error.message : 'Unable to save shared company data.' }, conflict ? 409 : 503);
   }
 }

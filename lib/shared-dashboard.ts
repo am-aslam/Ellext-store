@@ -1,4 +1,4 @@
-import { isStoredCurrencyRows, isStoredProductIncreases, isStoredSellingEntries, readVersioned, storageKeys, writeVersioned, type CurrencyRow, type ProductIncrease, type SellingEntry } from './storage';
+import { isStoredCurrencyRate, isStoredCurrencyRows, isStoredProductIncreases, isStoredSellingEntries, readVersioned, storageKeys, writeVersioned, type CurrencyRow, type ProductIncrease, type SellingEntry } from './storage';
 import { fetchWithDataLoading } from './data-fetch';
 
 export const sharedDashboardKeys = [
@@ -98,6 +98,18 @@ async function fetchSharedDashboardValue<T>(
   return result.value;
 }
 
+async function refreshSharedValueAfterConflict(key: SharedDashboardKey): Promise<void> {
+  switch (key) {
+    case storageKeys.currencyRows: await fetchSharedDashboardValue(key, isStoredCurrencyRows); return;
+    case storageKeys.currencyRate: await fetchSharedDashboardValue(key, isStoredCurrencyRate); return;
+    case storageKeys.productIncreases: await fetchSharedDashboardValue(key, isStoredProductIncreases); return;
+    case storageKeys.sellingEntries: await fetchSharedDashboardValue(key, isStoredSellingEntries); return;
+    case storageKeys.productCategories:
+      await fetchSharedDashboardValue(key, (value): value is string[] => Array.isArray(value) && value.every(item => typeof item === 'string' && item.trim().length > 0 && item.length <= 80));
+      return;
+  }
+}
+
 export function loadSharedDashboardValue<T>(
   key: SharedDashboardKey,
   validate: (value: unknown) => value is T,
@@ -167,17 +179,31 @@ export async function loadSharedDashboardValues(
 
 export function saveSharedDashboardValue(key: SharedDashboardKey, value: unknown): Promise<'supabase' | 'sqlite'> {
   const previous = saveQueue.get(key) ?? Promise.resolve<'supabase' | 'sqlite'>('supabase');
+  // Bind the CAS revision when the edit is submitted. Reading it later inside
+  // the queue would let a stale whole-snapshot payload inherit the preceding
+  // save's new revision and overwrite that save without a conflict.
+  const expectedRevision = revisions.get(key) ?? null;
   const next = previous.catch(() => {}).then(async () => {
     try {
       const response = await fetchWithDataLoading('/api/shared-dashboard', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ key, value, revision: revisions.get(key) ?? null }),
+          body: JSON.stringify({ key, value, revision: expectedRevision }),
       });
-      const result = await response.json().catch(() => ({})) as { error?: string; storageMode?: 'supabase' | 'sqlite'; revision?: string };
+      const responseText = await response.text();
+      let result: { error?: string; storageMode?: 'supabase' | 'sqlite'; revision?: string; requestId?: string } = {};
+      try { result = JSON.parse(responseText) as typeof result; } catch { /* Surface the HTTP status below without echoing server HTML. */ }
+      const requestId = response.headers.get('x-request-id') || result.requestId;
       if (!response.ok) {
-        throw new Error(result.error || 'Could not sync company data.');
+        const details = result.error || `Shared-data API returned HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ''}.`;
+        if (response.status === 409) {
+          try { await refreshSharedValueAfterConflict(key); }
+          catch { /* The submitted snapshot is still preserved below if refresh is unavailable. */ }
+          throw new Error(`Revision conflict: ${details} The latest shared snapshot was refreshed when reachable, and this submitted version was preserved for recovery. Refresh this page before retrying.${requestId ? ` (request ${requestId})` : ''}`);
+        }
+        throw new Error(`${details}${requestId ? ` (request ${requestId})` : ''}`);
       }
+      if (!result.revision || !result.storageMode) throw new Error(`Shared-data API returned an incomplete save confirmation${requestId ? ` (request ${requestId})` : ''}.`);
       revisions.set(key, typeof result.revision === 'string' ? result.revision : null);
       writeVersioned(key, value);
       return result.storageMode === 'sqlite' ? 'sqlite' : 'supabase';
